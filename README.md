@@ -8,6 +8,27 @@ It migrates teams, channels, users, memberships, messages, threads, direct
 messages, reactions and file attachments — and never modifies the RocketChat
 database (read-only).
 
+## Preamble
+At Liège Hackerspace, we have been using Rocket.Chat for many years.
+
+Over time, we have repeatedly faced frustrations with Rocket.Chat. 
+This does not mean we have anything against Rocket.Chat in particular; 
+we simply believe deeply in data portability, and at some point we wanted to see whether the grass might be greener elsewhere.
+
+After several exchanges with the Mattermost team, we had a very positive feeling. 
+This encouraged us to seriously consider migrating our community chat infrastructure from Rocket.Chat to Mattermost.
+
+As part of that migration effort, we built this tool to help convert a Rocket.Chat MongoDB database into a Mattermost bulk import JSONL archive, including attachments, ready to be imported with `mmctl`.
+
+We are releasing this migration tool as open source in its current state.
+
+It is provided **as-is**, with **no warranty**, **no guarantee that it will work for your instance**, 
+and no promise that it will cover every Rocket.Chat configuration or edge case. 
+It was primarily developed for our own migration needs, but we hope it may be useful to others facing similar challenges.
+
+We would like to thank all Liège Hackerspace members who helped test, review, and improve the migration process, 
+as well as the people at Mattermost who supported us, answered our questions, and helped make this migration possible.
+
 ## 📖 Documentation
 
 Full documentation lives in the **[Wiki](../../wiki)**:
