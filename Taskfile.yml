@@ -1,0 +1,83 @@
+# SPDX-License-Identifier: AGPL-3.0-or-later
+#
+# Task runner for Rocket2Matter — https://taskfile.dev
+#
+#   task            # list tasks
+#   task check      # typecheck + tests
+#   task migrate    # export + package
+#
+version: "3"
+
+vars:
+  PNPM: pnpm
+
+tasks:
+  default:
+    desc: List available tasks
+    cmds:
+      - task --list
+    silent: true
+
+  install:
+    desc: Install dependencies
+    cmds:
+      - "{{.PNPM}} install"
+
+  typecheck:
+    desc: TypeScript type checking (no emit)
+    cmds:
+      - "{{.PNPM}} typecheck"
+
+  test:
+    desc: Run the integration test (in-memory MongoDB)
+    cmds:
+      - "{{.PNPM}} test"
+
+  check:
+    desc: Typecheck then run tests
+    cmds:
+      - task: typecheck
+      - task: test
+
+  export:
+    desc: "Export RocketChat → out/import.jsonl (+ data/). Configure via env vars (MONGO_URI, …)."
+    cmds:
+      - "{{.PNPM}} cli export"
+
+  package:
+    desc: Package out/ into mattermost-import.zip
+    cmds:
+      - "{{.PNPM}} cli package"
+
+  reset-password:
+    desc: "Reset a migrated user's password (interactive). Use `-- --dry-run` to preview."
+    cmds:
+      - "{{.PNPM}} cli reset-password {{.CLI_ARGS}}"
+
+  migrate:
+    desc: Convenience — export then package
+    cmds:
+      - task: export
+      - task: package
+
+  bundle:
+    desc: Bundle the CLI into dist/cli.cjs (esbuild)
+    cmds:
+      - "{{.PNPM}} bundle"
+
+  build:
+    desc: Build the standalone binary → dist/rocket2matter
+    cmds:
+      - "{{.PNPM}} build:binary"
+
+  ci:
+    desc: Install + typecheck + test (what CI runs)
+    cmds:
+      - task: install
+      - task: typecheck
+      - task: test
+
+  clean:
+    desc: Remove build/export artifacts (dist/, out/, *.zip)
+    cmds:
+      - rm -rf dist out mattermost-import.zip
