@@ -1,0 +1,40 @@
+{
+  "name": "rocket2matter",
+  "version": "1.0.0",
+  "description": "Migration RocketChat (MongoDB) → Mattermost (bulk import JSONL)",
+  "type": "module",
+  "main": "src/index.ts",
+  "scripts": {
+    "cli": "tsx src/cli.ts",
+    "export": "tsx src/cli.ts export",
+    "package": "tsx src/cli.ts package",
+    "reset-password": "tsx src/cli.ts reset-password",
+    "bundle": "tsx scripts/bundle.ts",
+    "build:binary": "bash scripts/build-sea.sh",
+    "typecheck": "tsc --noEmit",
+    "test": "tsx test/run.ts"
+  },
+  "keywords": [
+    "rocketchat",
+    "mattermost",
+    "migration"
+  ],
+  "author": "",
+  "license": "AGPL-3.0-or-later",
+  "packageManager": "pnpm@10.28.0",
+  "pnpm": {
+    "onlyBuiltDependencies": [
+      "esbuild"
+    ]
+  },
+  "dependencies": {
+    "mongodb": "^6.12.0"
+  },
+  "devDependencies": {
+    "@types/node": "^22.10.0",
+    "esbuild": "^0.28.0",
+    "mongodb-memory-server": "^11.2.0",
+    "tsx": "^4.19.0",
+    "typescript": "^5.7.0"
+  }
+}
