@@ -43,6 +43,9 @@ export interface RcRoom {
   fname?: string; // display name
   topic?: string;
   description?: string;
+  archived?: boolean; // channel archived in RocketChat
+  prid?: string; // parent room id ⇒ this room is a "Discussion"
+  ts?: Date | string | number; // room creation time
   usernames?: string[]; // for DMs
   uids?: string[]; // for DMs
   u?: { _id: string; username: string };
@@ -89,6 +92,7 @@ export interface RcMessage {
   u: { _id: string; username?: string; name?: string };
   t?: string; // present ⇒ system message (to be ignored)
   tmid?: string; // thread main id (⇒ this is a reply)
+  drid?: string; // discussion room id (on a "discussion-created" system message)
   reactions?: RcReactions;
   file?: RcFileRef;
   files?: RcFileRef[];

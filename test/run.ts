@@ -43,8 +43,11 @@ async function seed(uri: string, dbName: string) {
 
   await db.collection("rocketchat_room").insertMany([
     { _id: "r1", t: "c", name: "Général", fname: "Général", topic: "Salon principal" },
-    { _id: "r2", t: "p", name: "Projet Secret" },
+    { _id: "r2", t: "p", name: "Projet Secret", archived: true },
     { _id: "r3", t: "d", usernames: ["alice", "Bob"], uids: ["u1", "u2"] },
+    // Discussion (child of r1): must NOT become a channel; its messages become
+    // a thread in r1 rooted at the "discussion-created" message.
+    { _id: "r5", t: "c", name: "kdi38fjssla", fname: "Sujet de discussion", prid: "r1", ts: new Date("2024-01-06T09:00:00Z"), u: { _id: "u1", username: "alice" } },
   ] as never);
 
   await db.collection("rocketchat_subscription").insertMany([
@@ -87,6 +90,11 @@ async function seed(uri: string, dbName: string) {
     },
     // empty, non-importable message: missing file + no caption
     { _id: "m9", rid: "r1", msg: "", ts: new Date("2024-01-05T10:00:00Z"), u: { _id: "u1", username: "alice" }, file: { _id: "fmissing", name: "perdu.png", type: "image/png" }, files: [{ _id: "fmissing", name: "perdu.png", type: "image/png" }] },
+    // Discussion linkage: the "discussion-created" system message (in r1) + the
+    // discussion's own messages (in r5).
+    { _id: "md0", rid: "r1", t: "discussion-created", drid: "r5", msg: "Sujet de discussion", ts: new Date("2024-01-06T09:00:00Z"), u: { _id: "u1", username: "alice" } },
+    { _id: "md1", rid: "r5", msg: "Premier message discussion", ts: new Date("2024-01-06T09:01:00Z"), u: { _id: "u2", username: "Bob" } },
+    { _id: "md2", rid: "r5", msg: "Deuxième message discussion", ts: new Date("2024-01-06T09:02:00Z"), u: { _id: "u1", username: "alice" } },
   ] as never);
 
   // Files in GridFS (rocketchat_uploads bucket) + metadata
@@ -317,6 +325,30 @@ async function main() {
     check(
       emojis.some((e) => e.emoji.name === "parrot"),
       "alias d'émoji exporté (parrot → même image)",
+    );
+
+    // per-channel archive: r2 (archived in RC) → deleted_at, even without ARCHIVE_CHANNELS
+    const secret = channels.find((c) => c.channel.name === "projet-secret");
+    const general1 = channels.find((c) => c.channel.name === "general");
+    check(
+      (secret?.channel.deleted_at ?? 0) > 0 && !general1?.channel.deleted_at,
+      "canal archivé RocketChat → deleted_at (sans ARCHIVE_CHANNELS)",
+    );
+
+    // discussion → thread: r5 is not a channel; its messages thread in general
+    check(
+      !channels.some((c) => c.channel.display_name === "Sujet de discussion"),
+      "discussion : pas de canal créé pour la discussion",
+    );
+    const discRoot = posts.find((p) => p.post.message === "Sujet de discussion");
+    check(
+      !!discRoot && discRoot.post.channel === "general",
+      "discussion : message d'origine devient un post du canal parent",
+    );
+    check(
+      !!discRoot?.post.replies?.some((r) => r.message === "Premier message discussion") &&
+        !!discRoot?.post.replies?.some((r) => r.message === "Deuxième message discussion"),
+      "discussion : messages rattachés en thread sous l'origine",
     );
 
     check(root1.post.is_pinned === true, "message épinglé : is_pinned");

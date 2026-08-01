@@ -32,6 +32,9 @@ export const config = {
   exportFiles: env.EXPORT_FILES !== "false", // GridFS attachment extraction
   exportReactions: env.EXPORT_REACTIONS !== "false",
   exportThreads: env.EXPORT_THREADS !== "false",
+  // RocketChat "Discussions" (rooms with a parent) → re-parented into the parent
+  // channel as a thread instead of standalone channels with message-like names.
+  mergeDiscussions: env.MERGE_DISCUSSIONS !== "false",
   exportAvatars: env.EXPORT_AVATARS !== "false", // user profile pictures
   exportEmojis: env.EXPORT_EMOJIS !== "false", // custom emojis
   // Skip custom-emoji images above this size — Mattermost rejects oversized

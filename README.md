@@ -7,8 +7,11 @@ packaged into a zip ready for `mmctl import`.
 It migrates teams, channels, users, memberships, messages, threads, direct
 messages, reactions, file attachments, user avatars, custom emojis, pinned and
 flagged messages, and per-channel read state — and never modifies the
-RocketChat database (read-only). Accounts that were inactive in RocketChat can
-be deactivated after import ([`scripts/deactivate-users.sh`](scripts/deactivate-users.sh)).
+RocketChat database (read-only). RocketChat **Discussions** are re-parented into
+their channel as threads, and **archived** channels stay archived. Accounts that
+were inactive in RocketChat can be deactivated after import, and direct-message
+read state replayed via SQL — see [`scripts/`](scripts/) and the generated
+`dm-readstate.sql`.
 
 ## Preamble
 At Liège Hackerspace, we have been using Rocket.Chat for many years.

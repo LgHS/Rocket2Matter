@@ -34,11 +34,22 @@ interface ChannelInfo {
   type: "O" | "P";
   topic?: string;
   description?: string;
+  archived?: boolean; // archived in RocketChat
 }
 
 interface DirectInfo {
   members: string[]; // Mattermost usernames (resolved)
   uids?: string[]; // RocketChat ids, fallback when usernames are missing
+}
+
+/**
+ * A RocketChat "Discussion" (a room with a parent). Mattermost has no such
+ * concept, so its messages are re-parented into the parent channel as a thread
+ * rooted at the message the discussion was started from.
+ */
+interface DiscussionInfo {
+  parentRoomId: string;
+  root: { msgId: string; user?: string; msg: string; ts: number };
 }
 
 /** Number of elements ≤ x in an ascending sorted array (binary search). */
@@ -137,9 +148,14 @@ export async function runExport() {
 
   try {
     // ----- 1. Rooms -----
-    const { channels, directs } = await loadRooms(db);
+    const { channels, directs, discussions } = await loadRooms(db);
+    if (config.mergeDiscussions && discussions.size) {
+      await loadDiscussionRoots(db, discussions, channels);
+    }
     console.log(
-      `📁 ${channels.size} canaux, ${directs.size} conversations directes.`,
+      `📁 ${channels.size} canaux, ${directs.size} conversations directes` +
+        (discussions.size ? `, ${discussions.size} discussions → threads` : "") +
+        ".",
     );
 
     // ----- 2. Users -----
@@ -158,6 +174,13 @@ export async function runExport() {
     const reads = new ReadTracker();
     const userChannels = await buildMemberships(db, channels, usernameMap, reads);
 
+    // Discussion roots: their author must be a member of the parent channel.
+    for (const d of discussions.values()) {
+      const parent = channels.get(d.parentRoomId);
+      const mm = d.root.user ? usernameMap.get(d.root.user) : undefined;
+      if (parent && mm) userChannels.addMember(mm, parent.name, "channel_user");
+    }
+
     // ----- 4. Threads + author-derived membership -----
     const threadReplies = new Map<string, RcMessage[]>();
     if (config.exportThreads || config.exportPosts) {
@@ -165,6 +188,7 @@ export async function runExport() {
         db,
         channels,
         directs,
+        discussions,
         usernameMap,
         usernameById,
         ghost,
@@ -216,7 +240,9 @@ export async function runExport() {
           type: ci.type,
           ...(ci.topic ? { header: ci.topic.slice(0, 1024) } : {}),
           ...(ci.description ? { purpose: ci.description.slice(0, 250) } : {}),
-          ...(config.archiveChannels ? { deleted_at: reads.archiveAt } : {}),
+          ...(config.archiveChannels || ci.archived
+            ? { deleted_at: reads.archiveAt }
+            : {}),
         },
       });
     }
@@ -250,6 +276,12 @@ export async function runExport() {
           direct_channel: { members: di.members },
         });
       }
+      // DM read state cannot travel through the bulk import (DirectChannel has
+      // no per-member view fields), so emit a SQL patch to replay post-import.
+      if (config.readState !== "unread") {
+        const n = await writeDmReadState(db, directs, usernameMap, outDir);
+        if (n) console.log(`👀 ${n} états de lecture DM → dm-readstate.sql (à rejouer post-import).`);
+      }
     }
 
     // ----- 6. Messages (posts + direct_posts) -----
@@ -259,6 +291,7 @@ export async function runExport() {
       orphanReplies: 0,
       pinned: 0,
       flagged: 0,
+      discussions: 0,
     };
     if (config.exportPosts) {
       await writePosts(
@@ -266,6 +299,7 @@ export async function runExport() {
         writer,
         channels,
         directs,
+        discussions,
         usernameMap,
         usernameById,
         ghost,
@@ -300,10 +334,16 @@ export async function runExport() {
     if (config.exportEmojis && emojiLines.length) {
       console.log(`   • ${emojiLines.length} émojis personnalisés`);
     }
+    if (counts.discussions) {
+      console.log(`   • ${counts.discussions} discussions fusionnées en threads`);
+    }
     if (counts.pinned) console.log(`   • ${counts.pinned} messages épinglés`);
     if (counts.flagged) console.log(`   • ${counts.flagged} favoris (flags)`);
-    if (config.archiveChannels) {
-      console.log(`   • canaux marqués comme archivés (deleted_at)`);
+    const archivedCount = config.archiveChannels
+      ? channels.size
+      : [...channels.values()].filter((c) => c.archived).length;
+    if (archivedCount) {
+      console.log(`   • ${archivedCount} canaux archivés (deleted_at)`);
     }
     if (config.readState !== "unread") {
       console.log(
@@ -318,10 +358,11 @@ export async function runExport() {
   }
 }
 
-/** Loads rooms: channels (c/p) and direct conversations (d). */
+/** Loads rooms: channels (c/p), direct conversations (d), and discussions. */
 async function loadRooms(db: Db) {
   const channels = new Map<string, ChannelInfo>(); // roomId → ChannelInfo
   const directs = new Map<string, DirectInfo>(); // roomId → DirectInfo
+  const discussions = new Map<string, DiscussionInfo>(); // roomId → parent+root
   const usedNames = new Set<string>();
 
   const cursor = db
@@ -333,6 +374,20 @@ async function loadRooms(db: Db) {
       directs.set(room._id, {
         members: room.usernames ?? [],
         uids: room.uids,
+      });
+      continue;
+    }
+    // A Discussion is re-parented into its parent channel as a thread (see
+    // loadDiscussionRoots); it must not become a channel of its own.
+    if (config.mergeDiscussions && room.prid) {
+      discussions.set(room._id, {
+        parentRoomId: room.prid,
+        root: {
+          msgId: `disc-${room._id}`, // fallback; replaced by the real message
+          user: room.u?.username,
+          msg: room.fname || room.name || "Discussion",
+          ts: toEpochMs(room.ts),
+        },
       });
       continue;
     }
@@ -354,9 +409,58 @@ async function loadRooms(db: Db) {
       type: room.t === "c" ? "O" : "P",
       topic: room.topic,
       description: room.description,
+      archived: room.archived === true,
     });
   }
-  return { channels, directs };
+  return { channels, directs, discussions };
+}
+
+/**
+ * Fills each discussion's real thread root from its `discussion-created` system
+ * message (the message it was started from, living in the parent channel).
+ * Discussions whose parent is not an exported channel are dropped.
+ */
+async function loadDiscussionRoots(
+  db: Db,
+  discussions: Map<string, DiscussionInfo>,
+  channels: Map<string, ChannelInfo>,
+) {
+  const cursor = db
+    .collection<RcMessage>("rocketchat_message")
+    .find({ t: "discussion-created", drid: { $exists: true } });
+  for await (const m of cursor) {
+    const d = m.drid ? discussions.get(m.drid) : undefined;
+    if (!d) continue;
+    d.root = {
+      msgId: m._id,
+      user: m.u?.username,
+      msg: (m.msg && m.msg.trim()) || d.root.msg,
+      ts: toEpochMs(m.ts),
+    };
+  }
+  // Drop discussions whose parent channel is not exported (e.g. parent is a DM
+  // or itself dropped): their messages fall back to being skipped.
+  for (const [id, d] of discussions) {
+    if (!channels.has(d.parentRoomId)) discussions.delete(id);
+  }
+}
+
+/**
+ * If a message belongs to a discussion, re-parents it into the discussion's
+ * parent channel and threads it under the discussion root. Mutates and returns
+ * the message.
+ */
+function remapDiscussion(
+  msg: RcMessage,
+  discussions: Map<string, DiscussionInfo>,
+): RcMessage {
+  const d = discussions.get(msg.rid);
+  if (d) {
+    msg.rid = d.parentRoomId;
+    // Flatten any in-discussion sub-thread into the single discussion thread.
+    msg.tmid = d.root.msgId;
+  }
+  return msg;
 }
 
 /**
@@ -486,6 +590,7 @@ async function scanMessages(
   db: Db,
   channels: Map<string, ChannelInfo>,
   directs: Map<string, DirectInfo>,
+  discussions: Map<string, DiscussionInfo>,
   usernameMap: Map<string, string>,
   usernameById: Map<string, string>,
   ghost: string,
@@ -499,6 +604,7 @@ async function scanMessages(
     .addCursorFlag("noCursorTimeout", true);
 
   for await (const msg of cursor) {
+    remapDiscussion(msg, discussions);
     if (!hasContent(msg)) continue;
 
     const inChannel = channels.get(msg.rid);
@@ -521,6 +627,72 @@ async function scanMessages(
   for (const arr of threadReplies.values()) {
     arr.sort((a, b) => toEpochMs(a.ts) - toEpochMs(b.ts));
   }
+}
+
+/**
+ * Emits a SQL patch (`dm-readstate.sql`) that replays RocketChat's per-user
+ * last-seen on Mattermost direct messages. The bulk import cannot carry DM read
+ * state (DirectChannelImportData has no per-member view fields), so this is run
+ * against the Mattermost database after the import.
+ *
+ * Only 1-to-1 DMs are handled (Mattermost derives their channel name from the
+ * two sorted user ids); multi-party direct rooms map to group channels whose id
+ * is a hash and are skipped.
+ */
+async function writeDmReadState(
+  db: Db,
+  directs: Map<string, DirectInfo>,
+  usernameMap: Map<string, string>,
+  outDir: string,
+): Promise<number> {
+  const safe = /^[a-z0-9._-]+$/;
+  const lines: string[] = [
+    "-- Mattermost DM read-state patch (generated by rocket2matter).",
+    "-- Replays RocketChat subscription.ls onto channelmembers for 1:1 DMs.",
+    "-- Run AFTER the import, e.g.: psql mattermost -f dm-readstate.sql",
+    "BEGIN;",
+  ];
+  let count = 0;
+
+  const cursor = db
+    .collection<RcSubscription>("rocketchat_subscription")
+    .find({ t: "d", ls: { $exists: true } })
+    .addCursorFlag("noCursorTimeout", true);
+
+  for await (const sub of cursor) {
+    const subscriber = usernameMap.get(sub.u?.username ?? "");
+    const di = directs.get(sub.rid);
+    if (!subscriber || !di || di.members.length !== 2) continue;
+    const partner = di.members.find((m) => m !== subscriber);
+    if (!partner || partner === subscriber) continue;
+    if (!safe.test(subscriber) || !safe.test(partner)) continue;
+
+    const ls = toEpochMs(sub.ls);
+    if (!ls) continue;
+    count++;
+
+    const seen =
+      `(SELECT count(*) FROM posts p WHERE p.channelid=cm.channelid ` +
+      `AND p.createat<=${ls} AND p.deleteat=0`;
+    lines.push(
+      `UPDATE channelmembers cm SET ` +
+        `lastviewedat=${ls}, ` +
+        `msgcount=${seen}), ` +
+        `msgcountroot=${seen} AND p.rootid=''), ` +
+        `mentioncount=0, mentioncountroot=0 ` +
+        `FROM users us, users up, channels c ` +
+        `WHERE us.username='${subscriber}' AND up.username='${partner}' ` +
+        `AND c.type='D' AND c.name=(CASE WHEN us.id<up.id ` +
+        `THEN us.id||'__'||up.id ELSE up.id||'__'||us.id END) ` +
+        `AND cm.channelid=c.id AND cm.userid=us.id;`,
+    );
+  }
+
+  lines.push("COMMIT;");
+  if (count) {
+    await writeFile(path.join(outDir, "dm-readstate.sql"), lines.join("\n") + "\n");
+  }
+  return count;
 }
 
 /** Writes the `user` blocks with their channel memberships embedded. */
@@ -602,6 +774,7 @@ async function writePosts(
   writer: JsonlWriter,
   channels: Map<string, ChannelInfo>,
   directs: Map<string, DirectInfo>,
+  discussions: Map<string, DiscussionInfo>,
   usernameMap: Map<string, string>,
   usernameById: Map<string, string>,
   ghost: string,
@@ -613,6 +786,7 @@ async function writePosts(
     orphanReplies: number;
     pinned: number;
     flagged: number;
+    discussions?: number;
   },
 ) {
   const seenRoots = new Set<string>();
@@ -648,6 +822,10 @@ async function writePosts(
     .sort({ ts: 1 });
 
   for await (const msg of cursor) {
+    // A discussion message has no tmid in RocketChat, so it lands in this root
+    // cursor; re-parenting turns it into a reply handled via buildReplies.
+    remapDiscussion(msg, discussions);
+    if (msg.tmid) continue;
     if (!hasContent(msg)) continue;
     seenRoots.add(msg._id);
 
@@ -697,6 +875,33 @@ async function writePosts(
         counts.directPosts++;
       }
     }
+  }
+
+  // Discussion roots: the "discussion-created" message becomes a normal post in
+  // the parent channel, carrying the discussion's messages as its thread.
+  for (const d of discussions.values()) {
+    const ci = channels.get(d.parentRoomId);
+    if (!ci) continue;
+    const rootId = d.root.msgId;
+    if (seenRoots.has(rootId)) continue;
+    const replies = config.exportThreads ? await buildReplies(rootId) : [];
+    const message = defuseMentions(d.root.msg ?? "", usernameMap);
+    if (!message && !replies.length) continue;
+    const author = (d.root.user && usernameMap.get(d.root.user)) || ghost;
+    seenRoots.add(rootId);
+    writer.write({
+      type: "post",
+      post: {
+        team: config.teamName,
+        channel: ci.name,
+        user: author,
+        message,
+        create_at: d.root.ts,
+        ...(replies.length ? { replies } : {}),
+      },
+    });
+    counts.posts++;
+    if (counts.discussions !== undefined) counts.discussions++;
   }
 
   // Orphan replies (root deleted / system) → standalone messages
