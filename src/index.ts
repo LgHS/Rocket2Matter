@@ -1,10 +1,11 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
-import { mkdir, rm } from "node:fs/promises";
+import { mkdir, rm, writeFile } from "node:fs/promises";
 import { existsSync } from "node:fs";
 import * as path from "node:path";
 import { Db, MongoClient } from "mongodb";
 import { config } from "./config.js";
 import { FileExporter } from "./files.js";
+import { AvatarExporter, EmojiExporter } from "./assets.js";
 import {
   JsonlWriter,
   combineMessage,
@@ -174,7 +175,26 @@ export async function runExport() {
     }
     reads.finalize();
 
-    // ----- 5. Write entities (order: version → team → channels → users → direct_channels) -----
+    // ----- 4b. Avatars + custom emojis (GridFS assets) -----
+    let avatarMap = new Map<string, string>();
+    if (config.exportAvatars) {
+      const avatarExporter = new AvatarExporter(db, outDir, config.dataDir);
+      avatarMap = await avatarExporter.exportAll(usernameById);
+      if (avatarMap.size) console.log(`🖼️  ${avatarMap.size} avatars extraits.`);
+    }
+    let emojiLines: { name: string; image: string }[] = [];
+    if (config.exportEmojis) {
+      const emojiExporter = new EmojiExporter(
+        db,
+        outDir,
+        config.dataDir,
+        config.emojiMaxBytes,
+      );
+      emojiLines = await emojiExporter.exportAll();
+      if (emojiLines.length) console.log(`😀 ${emojiLines.length} émojis personnalisés extraits.`);
+    }
+
+    // ----- 5. Write entities (order: version → team → channels → emojis → users → direct_channels) -----
     writer.write({ type: "version", version: 1 });
     writer.write({
       type: "team",
@@ -185,6 +205,7 @@ export async function runExport() {
       },
     });
 
+    if (config.exportMemberships)
     for (const ci of channels.values()) {
       writer.write({
         type: "channel",
@@ -200,7 +221,27 @@ export async function runExport() {
       });
     }
 
-    writeUsers(writer, users, userChannels, ghost, reads);
+    for (const emoji of emojiLines) {
+      writer.write({ type: "emoji", emoji });
+    }
+
+    writeUsers(writer, users, userChannels, ghost, reads, avatarMap);
+
+    // Mattermost bulk import cannot deactivate users; emit the list of accounts
+    // inactive in RocketChat so it can be replayed post-import via
+    // `mmctl user deactivate` (see scripts/deactivate-users.sh).
+    const inactive = users
+      .filter((u) => u.active === false)
+      .map((u) => (u as RcUser & { _mm: string })._mm);
+    if (inactive.length) {
+      await writeFile(
+        path.join(outDir, "deactivated-users.txt"),
+        inactive.join("\n") + "\n",
+      );
+      console.log(
+        `😴 ${inactive.length} comptes inactifs listés dans deactivated-users.txt (à rejouer post-import).`,
+      );
+    }
 
     if (config.exportDirect) {
       for (const di of directs.values()) {
@@ -212,7 +253,13 @@ export async function runExport() {
     }
 
     // ----- 6. Messages (posts + direct_posts) -----
-    const counts = { posts: 0, directPosts: 0, orphanReplies: 0 };
+    const counts = {
+      posts: 0,
+      directPosts: 0,
+      orphanReplies: 0,
+      pinned: 0,
+      flagged: 0,
+    };
     if (config.exportPosts) {
       await writePosts(
         db,
@@ -247,6 +294,14 @@ export async function runExport() {
       const s = fileExporter.stats;
       console.log(`   • ${s.exported} fichiers extraits (${s.skipped} ignorés)`);
     }
+    if (config.exportAvatars && avatarMap.size) {
+      console.log(`   • ${avatarMap.size} avatars`);
+    }
+    if (config.exportEmojis && emojiLines.length) {
+      console.log(`   • ${emojiLines.length} émojis personnalisés`);
+    }
+    if (counts.pinned) console.log(`   • ${counts.pinned} messages épinglés`);
+    if (counts.flagged) console.log(`   • ${counts.flagged} favoris (flags)`);
     if (config.archiveChannels) {
       console.log(`   • canaux marqués comme archivés (deleted_at)`);
     }
@@ -440,7 +495,8 @@ async function scanMessages(
 ) {
   const cursor = db
     .collection<RcMessage>("rocketchat_message")
-    .find({ t: { $exists: false } });
+    .find({ t: { $exists: false } })
+    .addCursorFlag("noCursorTimeout", true);
 
   for await (const msg of cursor) {
     if (!hasContent(msg)) continue;
@@ -474,6 +530,7 @@ function writeUsers(
   userChannels: MembershipMap,
   ghost: string,
   reads: ReadTracker,
+  avatarMap: Map<string, string>,
 ) {
   const teamRoles = (admin: boolean) =>
     admin ? "team_admin team_user" : "team_user";
@@ -489,6 +546,9 @@ function writeUsers(
     const mm = (user as RcUser & { _mm: string })._mm;
     const admin = !!user.roles?.includes("admin");
     const { first, last } = splitName(user.name);
+    const nickname = user.nickname?.trim();
+    const locale = normalizeLocale(user.language);
+    const profileImage = avatarMap.get(mm);
     writer.write({
       type: "user",
       user: {
@@ -497,35 +557,43 @@ function writeUsers(
         roles: admin ? "system_admin system_user" : "system_user",
         first_name: first,
         last_name: last,
+        ...(nickname ? { nickname: nickname.slice(0, 64) } : {}),
+        ...(locale ? { locale } : {}),
+        ...(profileImage ? { profile_image: profileImage } : {}),
+        teams: config.exportMemberships
+          ? [
+              {
+                name: config.teamName,
+                roles: teamRoles(admin),
+                channels: channelsOf(mm),
+              },
+            ]
+          : [],
+      },
+    });
+  }
+
+  // Ghost user — only meaningful as a post author, so skip it in a
+  // metadata-only export (no memberships, no posts).
+  if (config.exportMemberships) {
+    writer.write({
+      type: "user",
+      user: {
+        username: ghost,
+        email: config.ghostEmail,
+        roles: "system_user",
+        first_name: "Utilisateur",
+        last_name: "Archivé",
         teams: [
           {
             name: config.teamName,
-            roles: teamRoles(admin),
-            channels: channelsOf(mm),
+            roles: "team_user",
+            channels: channelsOf(ghost),
           },
         ],
       },
     });
   }
-
-  // Ghost user
-  writer.write({
-    type: "user",
-    user: {
-      username: ghost,
-      email: config.ghostEmail,
-      roles: "system_user",
-      first_name: "Utilisateur",
-      last_name: "Archivé",
-      teams: [
-        {
-          name: config.teamName,
-          roles: "team_user",
-          channels: channelsOf(ghost),
-        },
-      ],
-    },
-  });
 }
 
 /** Second pass: writes posts and direct_posts (roots + threads). */
@@ -539,7 +607,13 @@ async function writePosts(
   ghost: string,
   threadReplies: Map<string, RcMessage[]>,
   fileExporter: FileExporter | null,
-  counts: { posts: number; directPosts: number; orphanReplies: number },
+  counts: {
+    posts: number;
+    directPosts: number;
+    orphanReplies: number;
+    pinned: number;
+    flagged: number;
+  },
 ) {
   const seenRoots = new Set<string>();
 
@@ -550,7 +624,7 @@ async function writePosts(
     for (const r of arr) {
       const author = resolveAuthor(r, usernameMap, usernameById, ghost);
       const message = buildMessage(r, usernameMap);
-      const extras = await reactionsAndFiles(r, author, usernameMap, ghost, fileExporter);
+      const extras = await reactionsAndFiles(r, author, usernameMap, usernameById, ghost, fileExporter);
       if (!message && !extras.attachments?.length) continue; // empty reply
       out.push({
         user: author,
@@ -562,10 +636,15 @@ async function writePosts(
     return out;
   };
 
-  // roots + threadless messages, in chronological order
+  // roots + threadless messages, in chronological order.
+  // noCursorTimeout: this cursor stays open while each post's attachments are
+  // downloaded from GridFS (can exceed the server's 10-min idle cursor reaping).
+  // Streaming (not toArray) keeps memory low — important when running on the
+  // source host. Per-file downloads below are individually retried/skipped.
   const cursor = db
     .collection<RcMessage>("rocketchat_message")
     .find({ t: { $exists: false }, tmid: { $exists: false } })
+    .addCursorFlag("noCursorTimeout", true)
     .sort({ ts: 1 });
 
   for await (const msg of cursor) {
@@ -575,7 +654,9 @@ async function writePosts(
     const author = resolveAuthor(msg, usernameMap, usernameById, ghost);
     const message = buildMessage(msg, usernameMap);
     const createAt = toEpochMs(msg.ts);
-    const extras = await reactionsAndFiles(msg, author, usernameMap, ghost, fileExporter);
+    const extras = await reactionsAndFiles(msg, author, usernameMap, usernameById, ghost, fileExporter);
+    if (extras.is_pinned) counts.pinned++;
+    if (extras.flagged_by) counts.flagged += extras.flagged_by.length;
     const replies = config.exportThreads ? await buildReplies(msg._id) : [];
 
     // Do not create an empty post (e.g. missing file and no caption)
@@ -627,7 +708,7 @@ async function writePosts(
         const author = resolveAuthor(r, usernameMap, usernameById, ghost);
         const message = buildMessage(r, usernameMap);
         const createAt = toEpochMs(r.ts);
-        const extras = await reactionsAndFiles(r, author, usernameMap, ghost, fileExporter);
+        const extras = await reactionsAndFiles(r, author, usernameMap, usernameById, ghost, fileExporter);
         if (!message && !extras.attachments?.length) continue; // empty post
         const ci = channels.get(r.rid);
         if (ci) {
@@ -663,15 +744,45 @@ async function writePosts(
   }
 }
 
-/** A message's reactions + attachments, in Mattermost format. */
+/** Normalizes a RocketChat language ("fr", "pt-BR") to a Mattermost locale. */
+function normalizeLocale(lang: string | undefined): string | undefined {
+  const m = /^([a-zA-Z]{2})/.exec((lang ?? "").trim());
+  return m ? m[1].toLowerCase() : undefined;
+}
+
+/** A message's reactions, attachments, pin and flag state, in Mattermost format. */
 async function reactionsAndFiles(
   msg: RcMessage,
   _author: string,
   usernameMap: Map<string, string>,
+  usernameById: Map<string, string>,
   ghost: string,
   fileExporter: FileExporter | null,
-): Promise<{ reactions?: MmReaction[]; attachments?: MmAttachment[] }> {
-  const out: { reactions?: MmReaction[]; attachments?: MmAttachment[] } = {};
+): Promise<{
+  reactions?: MmReaction[];
+  attachments?: MmAttachment[];
+  is_pinned?: boolean;
+  flagged_by?: string[];
+}> {
+  const out: {
+    reactions?: MmReaction[];
+    attachments?: MmAttachment[];
+    is_pinned?: boolean;
+    flagged_by?: string[];
+  } = {};
+
+  if (config.exportPins && msg.pinned) out.is_pinned = true;
+
+  if (config.exportStars && msg.starred?.length) {
+    const flagged = [
+      ...new Set(
+        msg.starred
+          .map((s) => usernameById.get(s._id))
+          .filter((u): u is string => !!u),
+      ),
+    ];
+    if (flagged.length) out.flagged_by = flagged;
+  }
 
   if (config.exportReactions) {
     const reactions = convertReactions(

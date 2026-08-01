@@ -32,6 +32,17 @@ export const config = {
   exportFiles: env.EXPORT_FILES !== "false", // GridFS attachment extraction
   exportReactions: env.EXPORT_REACTIONS !== "false",
   exportThreads: env.EXPORT_THREADS !== "false",
+  exportAvatars: env.EXPORT_AVATARS !== "false", // user profile pictures
+  exportEmojis: env.EXPORT_EMOJIS !== "false", // custom emojis
+  // Skip custom-emoji images above this size — Mattermost rejects oversized
+  // emojis and a single one aborts the whole import job.
+  emojiMaxBytes: Number(env.EMOJI_MAX_BYTES ?? 512 * 1024),
+  // Channel/team memberships (channels + user `teams`). Disable for a
+  // metadata-only re-import (avatars/emojis/profile) that must NOT reset the
+  // read-state already applied by a previous full import.
+  exportMemberships: env.EXPORT_MEMBERSHIPS !== "false",
+  exportPins: env.EXPORT_PINS !== "false", // pinned messages (is_pinned)
+  exportStars: env.EXPORT_STARS !== "false", // starred messages (flagged_by)
 
   // --- Import options ---
   // Archive every channel on import (they appear deactivated/archived).

@@ -1,8 +1,11 @@
 node_modules/
 dist/
 out/
+out-*/
 import.jsonl
+deactivated-users.txt
 *.zip
+*.log
 .DS_Store
 .devbox/
 .claude/

@@ -40,6 +40,40 @@ export function sanitizeUsername(raw: string): string {
   return u.length ? u : "user";
 }
 
+/**
+ * Retries an async MongoDB operation on transient topology/network errors
+ * (monitor timeouts, dropped connections, expired cursors). When the source
+ * mongo is a busy production instance reached over an SSH tunnel, brief SDAM
+ * "server monitor timeout" blips are common: without this, a single blip during
+ * the long attachment-download phase aborts the whole export.
+ */
+export async function retryTransient<T>(
+  fn: () => Promise<T>,
+  label = "opération mongo",
+  tries = 6,
+): Promise<T> {
+  let lastErr: unknown;
+  for (let attempt = 1; attempt <= tries; attempt++) {
+    try {
+      return await fn();
+    } catch (err) {
+      lastErr = err;
+      const msg = (err as Error)?.message ?? String(err);
+      const transient =
+        /monitor|timed out|timeout|topology|server selection|ECONNRESET|ECONNREFUSED|EPIPE|ETIMEDOUT|interrupted|cursor.*not found|socket|pool was cleared|no connection/i.test(
+          msg,
+        );
+      if (!transient || attempt === tries) throw err;
+      const delay = Math.min(30000, 1000 * 2 ** (attempt - 1));
+      console.warn(
+        `  ⏳ ${label} : erreur transitoire (${msg.slice(0, 90)}) — nouvelle tentative ${attempt + 1}/${tries} dans ${delay}ms`,
+      );
+      await new Promise((r) => setTimeout(r, delay));
+    }
+  }
+  throw lastErr;
+}
+
 /** Split "First Last name" into {first, last}. */
 export function splitName(full?: string): { first: string; last: string } {
   const parts = (full ?? "").trim().split(/\s+/).filter(Boolean);

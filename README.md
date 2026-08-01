@@ -5,8 +5,10 @@ database and produces a Mattermost **bulk import JSONL** file (plus attachments)
 packaged into a zip ready for `mmctl import`.
 
 It migrates teams, channels, users, memberships, messages, threads, direct
-messages, reactions and file attachments — and never modifies the RocketChat
-database (read-only).
+messages, reactions, file attachments, user avatars, custom emojis, pinned and
+flagged messages, and per-channel read state — and never modifies the
+RocketChat database (read-only). Accounts that were inactive in RocketChat can
+be deactivated after import ([`scripts/deactivate-users.sh`](scripts/deactivate-users.sh)).
 
 ## Preamble
 At Liège Hackerspace, we have been using Rocket.Chat for many years.

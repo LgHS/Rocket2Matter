@@ -35,7 +35,7 @@ async function seed(uri: string, dbName: string) {
   const db = client.db(dbName);
 
   await db.collection("users").insertMany([
-    { _id: "u1", username: "alice", name: "Alice Martin", emails: [{ address: "alice@x.fr" }], roles: ["admin", "user"] },
+    { _id: "u1", username: "alice", name: "Alice Martin", nickname: "Ali", language: "fr-BE", active: true, emails: [{ address: "alice@x.fr" }], roles: ["admin", "user"] },
     { _id: "u2", username: "Bob", name: "Bob Durand", emails: [{ address: "bob@x.fr" }], roles: ["user"] },
     { _id: "u3", username: "noemail", name: "Sans Email", roles: ["user"] }, // skipped (no email)
     { _id: "u4", username: "robot", emails: [{ address: "r@x.fr" }], type: "bot" }, // skipped (bot)
@@ -55,7 +55,7 @@ async function seed(uri: string, dbName: string) {
 
   await db.collection("rocketchat_message").insertMany([
     // thread root in r1
-    { _id: "m1", rid: "r1", msg: "Bonjour @Bob et @inconnu", ts: new Date("2024-01-01T10:00:00Z"), u: { _id: "u1", username: "alice" }, reactions: { ":+1:": { usernames: ["Bob"] } } },
+    { _id: "m1", rid: "r1", msg: "Bonjour @Bob et @inconnu", ts: new Date("2024-01-01T10:00:00Z"), u: { _id: "u1", username: "alice" }, reactions: { ":+1:": { usernames: ["Bob"] } }, pinned: true, starred: [{ _id: "u2" }] },
     // reply to thread m1
     { _id: "m2", rid: "r1", msg: "Salut Alice", ts: new Date("2024-01-01T10:05:00Z"), u: { _id: "u2", username: "Bob" }, tmid: "m1" },
     // system message (ignored)
@@ -107,6 +107,40 @@ async function seed(uri: string, dbName: string) {
     { _id: "f1b" as never, name: "Caché à voir.png", type: "image/png", store: "GridFS:Uploads" },
     { _id: "fthumb" as never, name: "thumb-Caché à voir.png", type: "image/png", store: "GridFS:Uploads" },
   ] as never);
+
+  // Minimal but valid images (the exporter validates format + dimensions).
+  const PNG_1x1 = Buffer.from(
+    "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+M8AAAMBAQDJ/pLvAAAAAElFTkSuQmCC",
+    "base64",
+  );
+  const GIF_1x1 = Buffer.from(
+    "R0lGODlhAQABAIAAAAAAAP///yH5BAEAAAAALAAAAAABAAEAAAIBRAA7",
+    "base64",
+  );
+
+  // Avatar for alice (bucket "rocketchat_avatars" + mapping collection)
+  const avatarBucket = new GridFSBucket(db, { bucketName: "rocketchat_avatars" });
+  await new Promise<void>((resolve, reject) => {
+    Readable.from([PNG_1x1])
+      .pipe(avatarBucket.openUploadStreamWithId("av1" as never, "av1"))
+      .on("finish", () => resolve())
+      .on("error", reject);
+  });
+  await db.collection("rocketchat_avatars").insertOne({
+    _id: "av1" as never, userId: "u1", name: "alice", type: "image/png", store: "GridFS:Avatars",
+  } as never);
+
+  // Custom emoji "partyparrot" (+ alias "parrot"), bucket "custom_emoji"
+  const emojiBucket = new GridFSBucket(db, { bucketName: "custom_emoji" });
+  await new Promise<void>((resolve, reject) => {
+    Readable.from([GIF_1x1])
+      .pipe(emojiBucket.openUploadStreamWithId("em1" as never, "partyparrot.gif"))
+      .on("finish", () => resolve())
+      .on("error", reject);
+  });
+  await db.collection("rocketchat_custom_emoji").insertOne({
+    _id: "e1" as never, name: "partyparrot", aliases: ["parrot"], extension: "gif",
+  } as never);
 
   await client.close();
 }
@@ -261,6 +295,34 @@ async function main() {
     check(
       !posts.some((p) => p.post.create_at === new Date("2024-01-05T10:00:00Z").getTime()),
       "post vide (fichier introuvable, sans texte) ignoré",
+    );
+
+    // ----- Avatars / emojis / nickname / locale / pins / stars -----
+    check(alice.user.nickname === "Ali", "nickname exporté (Ali)");
+    check(alice.user.locale === "fr", "locale normalisée (fr-BE → fr)");
+    check(
+      alice.user.profile_image === "avatars/alice.png" &&
+        existsSync(path.join(outDir, "data", "avatars", "alice.png")),
+      "avatar extrait + profile_image sans préfixe data/",
+    );
+
+    const emojis = byType("emoji") as Extract<MmLine, { type: "emoji" }>[];
+    const parrot = emojis.find((e) => e.emoji.name === "partyparrot");
+    check(!!parrot, "émoji personnalisé exporté (partyparrot)");
+    check(
+      !!parrot && parrot.emoji.image === "emoji/partyparrot.gif" &&
+        existsSync(path.join(outDir, "data", "emoji", "partyparrot.gif")),
+      "image émoji extraite sous data/emoji/<nom>",
+    );
+    check(
+      emojis.some((e) => e.emoji.name === "parrot"),
+      "alias d'émoji exporté (parrot → même image)",
+    );
+
+    check(root1.post.is_pinned === true, "message épinglé : is_pinned");
+    check(
+      !!root1.post.flagged_by?.includes("bob"),
+      "message favori : flagged_by (Bob → bob)",
     );
 
     // ----- Second export: archive + "last-seen" read-state options -----

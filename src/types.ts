@@ -10,11 +10,30 @@ export interface RcUser {
   _id: string;
   username?: string;
   name?: string;
+  nickname?: string;
+  language?: string; // e.g. "fr", "en" → Mattermost locale
   emails?: { address: string; verified?: boolean }[];
   roles?: string[];
   type?: string; // "bot" | "user" | ...
   active?: boolean;
   _mm?: string; // normalized Mattermost username (added during export)
+}
+
+/** A RocketChat avatar (collection `rocketchat_avatars`, GridFS bucket idem). */
+export interface RcAvatar {
+  _id: string; // GridFS file id
+  userId: string;
+  name?: string; // username at upload time
+  type?: string; // mime, e.g. "image/jpeg"
+  store?: string; // "GridFS:Avatars" | ...
+}
+
+/** A RocketChat custom emoji (collection `rocketchat_custom_emoji`). */
+export interface RcCustomEmoji {
+  _id: string;
+  name: string;
+  aliases?: string[];
+  extension?: string; // "png" | "gif" | "jpg" | ...
 }
 
 export interface RcRoom {
@@ -74,6 +93,8 @@ export interface RcMessage {
   file?: RcFileRef;
   files?: RcFileRef[];
   attachments?: RcAttachment[];
+  pinned?: boolean;
+  starred?: { _id: string }[]; // user ids who starred the message
 }
 
 export interface RcUpload {
@@ -104,6 +125,8 @@ export interface MmReply {
   create_at: number;
   reactions?: MmReaction[];
   attachments?: MmAttachment[];
+  is_pinned?: boolean;
+  flagged_by?: string[];
 }
 
 export interface MmPost {
@@ -115,6 +138,8 @@ export interface MmPost {
   reactions?: MmReaction[];
   replies?: MmReply[];
   attachments?: MmAttachment[];
+  is_pinned?: boolean;
+  flagged_by?: string[];
 }
 
 export interface MmDirectPost {
@@ -125,6 +150,8 @@ export interface MmDirectPost {
   reactions?: MmReaction[];
   replies?: MmReply[];
   attachments?: MmAttachment[];
+  is_pinned?: boolean;
+  flagged_by?: string[];
 }
 
 export interface MmChannelMembership {
@@ -167,9 +194,14 @@ export type MmLine =
         roles: string;
         first_name?: string;
         last_name?: string;
+        nickname?: string;
+        position?: string;
+        locale?: string;
+        profile_image?: string; // path (relative to the import data root)
         teams: MmTeamMembership[];
       };
     }
+  | { type: "emoji"; emoji: { name: string; image: string } }
   | { type: "post"; post: MmPost }
   | { type: "direct_channel"; direct_channel: { members: string[]; header?: string } }
   | { type: "direct_post"; direct_post: MmDirectPost };
