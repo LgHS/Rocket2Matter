@@ -20,13 +20,10 @@ export async function runPackage() {
   const outDir = path.resolve(config.outDir);
   const jsonl = path.join(outDir, config.jsonlFile);
   if (!existsSync(jsonl)) {
-    console.error(
-      `❌ ${jsonl} introuvable. Lancez d'abord l'export : pnpm export`,
-    );
-    process.exit(1);
+    throw new Error(`${jsonl} introuvable. Lancez d'abord l'export.`);
   }
 
-  const zipPath = path.resolve("mattermost-import.zip");
+  const zipPath = path.resolve(config.zipFile);
   if (existsSync(zipPath)) await rm(zipPath);
 
   const entries: string[] = [config.jsonlFile];
@@ -42,15 +39,11 @@ export async function runPackage() {
       maxBuffer: 256 * 1024 * 1024,
     });
   } catch (err) {
-    console.error(
-      "❌ Échec de la création du zip (la commande `zip` est-elle installée ?)",
+    throw new Error(
+      `échec de la création du zip (la commande \`zip\` est-elle installée ?) : ${(err as Error).message}`,
     );
-    console.error((err as Error).message);
-    process.exit(1);
   }
 
   console.log(`✅ Archive prête : ${zipPath}`);
-  console.log("\nImport côté Mattermost :");
-  console.log("  mmctl import upload ./mattermost-import.zip");
-  console.log("  mmctl import process <id-renvoyé>");
+  console.log("➡️  Suite : rocket2matter upload, puis rocket2matter import");
 }

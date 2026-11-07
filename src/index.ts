@@ -1,11 +1,17 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 import { mkdir, rm, writeFile } from "node:fs/promises";
-import { existsSync } from "node:fs";
+import { existsSync, readFileSync } from "node:fs";
 import * as path from "node:path";
 import { Db, MongoClient } from "mongodb";
 import { config } from "./config.js";
 import { FileExporter } from "./files.js";
 import { AvatarExporter, EmojiExporter } from "./assets.js";
+import { writeReadStateSql } from "./readstate.js";
+import { MongoTunnel } from "./tunnel.js";
+import { Watchdog, gate } from "./watchdog.js";
+import { formatBytes } from "./shell.js";
+
+export const READSTATE_FILE = "readstate.sql";
 import {
   JsonlWriter,
   combineMessage,
@@ -126,10 +132,57 @@ class ReadTracker {
   }
 }
 
-export async function runExport() {
+export interface ExportOptions {
+  /** "username email" lines of accounts already in the target (overrides EXISTING_USERS). */
+  existingUsers?: string;
+}
+
+export interface ExportSummary {
+  finishedAt: number;
+  users: number;
+  inactiveUsers: number;
+  channels: number;
+  archivedChannels: number;
+  directChannels: number;
+  posts: number;
+  directPosts: number;
+  files: number;
+  avatars: number;
+  emojis: number;
+  emojiNames: string[];
+  pinned: number;
+}
+
+export const SUMMARY_FILE = "summary.json";
+
+export async function runExport(opts: ExportOptions = {}) {
   console.log("🚀 Migration RocketChat → Mattermost\n");
-  const client = new MongoClient(config.mongoUri);
-  await client.connect();
+  const log = (m: string) => console.log(`  ${m}`);
+
+  // Optional: SSH tunnel to MongoDB + load watchdog on the RocketChat host.
+  let tunnel: MongoTunnel | undefined;
+  let watchdog: Watchdog | undefined;
+  let mongoUri = config.mongoUri;
+  if (config.sourceSsh) {
+    tunnel = new MongoTunnel();
+    mongoUri = await tunnel.open(config.mongoUri, log);
+    if (config.watchdog) {
+      watchdog = new Watchdog(log);
+      await watchdog.start();
+    }
+  }
+  if (config.fileRateLimit) {
+    log(`lecture des fichiers bridée à ${formatBytes(config.fileRateLimit)}/s (FILE_RATE_LIMIT)`);
+  }
+
+  const client = new MongoClient(mongoUri);
+  try {
+    await client.connect();
+  } catch (err) {
+    watchdog?.stop();
+    tunnel?.close();
+    throw err;
+  }
   const db = client.db(config.dbName);
   console.log(`Connecté à la base "${config.dbName}".`);
 
@@ -159,7 +212,7 @@ export async function runExport() {
     );
 
     // ----- 2. Users -----
-    const { users, usernameMap, usernameById, ghost } = await loadUsers(db);
+    const { users, usernameMap, usernameById, ghost } = await loadUsers(db, opts.existingUsers);
     console.log(`👤 ${users.length} utilisateurs exportables.`);
 
     // Resolve direct-conversation members
@@ -256,9 +309,10 @@ export async function runExport() {
     // Mattermost bulk import cannot deactivate users; emit the list of accounts
     // inactive in RocketChat so it can be replayed post-import via
     // `mmctl user deactivate` (see scripts/deactivate-users.sh).
+    // By email: an SSO login may rename the account before this list is replayed.
     const inactive = users
       .filter((u) => u.active === false)
-      .map((u) => (u as RcUser & { _mm: string })._mm);
+      .map((u) => u.emails![0].address.toLowerCase());
     if (inactive.length) {
       await writeFile(
         path.join(outDir, "deactivated-users.txt"),
@@ -276,12 +330,33 @@ export async function runExport() {
           direct_channel: { members: di.members },
         });
       }
-      // DM read state cannot travel through the bulk import (DirectChannel has
-      // no per-member view fields), so emit a SQL patch to replay post-import.
-      if (config.readState !== "unread") {
-        const n = await writeDmReadState(db, directs, usernameMap, outDir);
-        if (n) console.log(`👀 ${n} états de lecture DM → dm-readstate.sql (à rejouer post-import).`);
-      }
+    }
+
+    // Per-user read state (channels, DMs, groups) is replayed post-import by
+    // SQL: see readstate.ts for why the import file cannot carry it faithfully.
+    if (config.readState === "last-seen") {
+      const r = await writeReadStateSql(
+        db,
+        {
+          teamName: config.teamName,
+          channelNameByRoom: new Map([...channels].map(([id, ci]) => [id, ci.name])),
+          directMembersByRoom: new Map([...directs].map(([id, di]) => [id, di.members])),
+          skipRooms: new Set(discussions.keys()),
+          usernameMap,
+          emailByUser: new Map([
+            ...users.map((u) => [
+              (u as RcUser & { _mm: string })._mm,
+              u.emails![0].address.toLowerCase(),
+            ] as [string, string]),
+            [ghost, config.ghostEmail.toLowerCase()],
+          ]),
+          memberships: userChannels,
+        },
+        path.join(outDir, READSTATE_FILE),
+      );
+      console.log(
+        `👀 ${r.rows} états de lecture par utilisateur (${r.read} lus, ${r.partial} partiels) → ${READSTATE_FILE} (à rejouer post-import).`,
+      );
     }
 
     // ----- 6. Messages (posts + direct_posts) -----
@@ -310,6 +385,26 @@ export async function runExport() {
     }
 
     await writer.close();
+
+    // Machine-readable summary, used by `verify` to check the import.
+    const summary: ExportSummary = {
+      finishedAt: Date.now(),
+      users: users.length,
+      inactiveUsers: inactive.length,
+      channels: channels.size,
+      archivedChannels: config.archiveChannels
+        ? channels.size
+        : [...channels.values()].filter((c) => c.archived).length,
+      directChannels: config.exportDirect ? directs.size : 0,
+      posts: counts.posts,
+      directPosts: counts.directPosts,
+      files: fileExporter?.stats.exported ?? 0,
+      avatars: avatarMap.size,
+      emojis: emojiLines.length,
+      emojiNames: emojiLines.map((e) => e.name),
+      pinned: counts.pinned,
+    };
+    await writeFile(path.join(outDir, SUMMARY_FILE), JSON.stringify(summary, null, 2) + "\n");
 
     // ----- Summary -----
     console.log("\n----------------------------------------------------");
@@ -354,7 +449,9 @@ export async function runExport() {
       `\n➡️  Empaqueter pour Mattermost : pnpm package  (génère le zip d'import)`,
     );
   } finally {
+    watchdog?.stop();
     await client.close();
+    tunnel?.close();
   }
 }
 
@@ -428,6 +525,7 @@ async function loadDiscussionRoots(
   const cursor = db
     .collection<RcMessage>("rocketchat_message")
     .find({ t: "discussion-created", drid: { $exists: true } });
+  const quoted = new Map<string, string>(); // discussion room → original message id
   for await (const m of cursor) {
     const d = m.drid ? discussions.get(m.drid) : undefined;
     if (!d) continue;
@@ -437,6 +535,27 @@ async function loadDiscussionRoots(
       msg: (m.msg && m.msg.trim()) || d.root.msg,
       ts: toEpochMs(m.ts),
     };
+    // A discussion started FROM a message quotes it (message_link "…?msg=<id>"):
+    // thread onto that original message instead of duplicating its text.
+    for (const a of m.attachments ?? []) {
+      const id = /[?&]msg=([^&#]+)/.exec(a.message_link ?? "")?.[1];
+      if (id) quoted.set(m.drid!, id);
+    }
+  }
+  if (quoted.size) {
+    const originals = await db
+      .collection<RcMessage>("rocketchat_message")
+      .find({ _id: { $in: [...quoted.values()] }, t: { $exists: false } })
+      .toArray();
+    const byId = new Map(originals.map((o) => [o._id, o]));
+    for (const [drid, id] of quoted) {
+      const d = discussions.get(drid);
+      const o = byId.get(id);
+      if (!d || !o || o.rid !== d.parentRoomId) continue;
+      // Mattermost threads have one level: if the original is itself a reply,
+      // the discussion joins the thread it belongs to.
+      d.root = { msgId: o.tmid ?? o._id, user: o.u?.username, msg: o.msg ?? d.root.msg, ts: toEpochMs(o.ts) };
+    }
   }
   // Drop discussions whose parent channel is not exported (e.g. parent is a DM
   // or itself dropped): their messages fall back to being skipped.
@@ -499,7 +618,7 @@ function resolveDirects(
  * RocketChat username → normalized Mattermost username mapping (lowercase,
  * valid charset, guaranteed uniqueness).
  */
-async function loadUsers(db: Db) {
+async function loadUsers(db: Db, existingUsersText?: string) {
   const users: RcUser[] = []; // each user gets a _mm field (target username)
   const usernameMap = new Map<string, string>(); // RC → MM
   const usernameById = new Map<string, string>(); // RC id → MM
@@ -507,6 +626,22 @@ async function loadUsers(db: Db) {
 
   const ghost = sanitizeUsername(config.ghostUsername);
   usedMm.add(ghost);
+
+  // Accounts already in the target Mattermost: merge by email, reserve the rest.
+  const existingByEmail = new Map<string, string>(); // email → MM username
+  const existingText =
+    existingUsersText ??
+    (config.existingUsersFile && config.existingUsersFile !== "auto"
+      ? readFileSync(config.existingUsersFile, "utf8")
+      : "");
+  if (existingText) {
+    for (const line of existingText.split("\n")) {
+      const [username, email] = line.trim().split(/\s+/);
+      if (!username) continue;
+      usedMm.add(username.toLowerCase());
+      if (email) existingByEmail.set(email.toLowerCase(), username.toLowerCase());
+    }
+  }
 
   const uniqueMm = (raw: string): string => {
     const base = sanitizeUsername(raw);
@@ -529,7 +664,12 @@ async function loadUsers(db: Db) {
       console.warn(`  ⚠️  Utilisateur "${user.username}" sans email — ignoré.`);
       continue;
     }
-    const mm = uniqueMm(user.username);
+    const existing = existingByEmail.get(email.toLowerCase());
+    if (existing) {
+      existingByEmail.delete(email.toLowerCase()); // one RC user per account
+      console.log(`  🔗 "${user.username}" fusionné dans le compte existant "${existing}" (${email}).`);
+    }
+    const mm = existing ?? uniqueMm(user.username);
     (user as RcUser & { _mm: string })._mm = mm;
     users.push(user);
     usernameMap.set(user.username, mm);
@@ -604,6 +744,7 @@ async function scanMessages(
     .addCursorFlag("noCursorTimeout", true);
 
   for await (const msg of cursor) {
+    await gate(); // watchdog pause (RocketChat host under pressure)
     remapDiscussion(msg, discussions);
     if (!hasContent(msg)) continue;
 
@@ -629,71 +770,6 @@ async function scanMessages(
   }
 }
 
-/**
- * Emits a SQL patch (`dm-readstate.sql`) that replays RocketChat's per-user
- * last-seen on Mattermost direct messages. The bulk import cannot carry DM read
- * state (DirectChannelImportData has no per-member view fields), so this is run
- * against the Mattermost database after the import.
- *
- * Only 1-to-1 DMs are handled (Mattermost derives their channel name from the
- * two sorted user ids); multi-party direct rooms map to group channels whose id
- * is a hash and are skipped.
- */
-async function writeDmReadState(
-  db: Db,
-  directs: Map<string, DirectInfo>,
-  usernameMap: Map<string, string>,
-  outDir: string,
-): Promise<number> {
-  const safe = /^[a-z0-9._-]+$/;
-  const lines: string[] = [
-    "-- Mattermost DM read-state patch (generated by rocket2matter).",
-    "-- Replays RocketChat subscription.ls onto channelmembers for 1:1 DMs.",
-    "-- Run AFTER the import, e.g.: psql mattermost -f dm-readstate.sql",
-    "BEGIN;",
-  ];
-  let count = 0;
-
-  const cursor = db
-    .collection<RcSubscription>("rocketchat_subscription")
-    .find({ t: "d", ls: { $exists: true } })
-    .addCursorFlag("noCursorTimeout", true);
-
-  for await (const sub of cursor) {
-    const subscriber = usernameMap.get(sub.u?.username ?? "");
-    const di = directs.get(sub.rid);
-    if (!subscriber || !di || di.members.length !== 2) continue;
-    const partner = di.members.find((m) => m !== subscriber);
-    if (!partner || partner === subscriber) continue;
-    if (!safe.test(subscriber) || !safe.test(partner)) continue;
-
-    const ls = toEpochMs(sub.ls);
-    if (!ls) continue;
-    count++;
-
-    const seen =
-      `(SELECT count(*) FROM posts p WHERE p.channelid=cm.channelid ` +
-      `AND p.createat<=${ls} AND p.deleteat=0`;
-    lines.push(
-      `UPDATE channelmembers cm SET ` +
-        `lastviewedat=${ls}, ` +
-        `msgcount=${seen}), ` +
-        `msgcountroot=${seen} AND p.rootid=''), ` +
-        `mentioncount=0, mentioncountroot=0 ` +
-        `FROM users us, users up, channels c ` +
-        `WHERE us.username='${subscriber}' AND up.username='${partner}' ` +
-        `AND c.type='D' AND c.name=(CASE WHEN us.id<up.id ` +
-        `THEN us.id||'__'||up.id ELSE up.id||'__'||us.id END) ` +
-        `AND cm.channelid=c.id AND cm.userid=us.id;`,
-    );
-  }
-
-  lines.push("COMMIT;");
-  if (count) {
-    await writeFile(path.join(outDir, "dm-readstate.sql"), lines.join("\n") + "\n");
-  }
-  return count;
-}
 
 /** Writes the `user` blocks with their channel memberships embedded. */
 function writeUsers(
@@ -732,6 +808,12 @@ function writeUsers(
         ...(nickname ? { nickname: nickname.slice(0, 64) } : {}),
         ...(locale ? { locale } : {}),
         ...(profileImage ? { profile_image: profileImage } : {}),
+        ...(config.authService
+          ? {
+              auth_service: config.authService,
+              auth_data: user.emails![0].address.toLowerCase(),
+            }
+          : {}),
         teams: config.exportMemberships
           ? [
               {
@@ -822,6 +904,7 @@ async function writePosts(
     .sort({ ts: 1 });
 
   for await (const msg of cursor) {
+    await gate(); // watchdog pause (RocketChat host under pressure)
     // A discussion message has no tmid in RocketChat, so it lands in this root
     // cursor; re-parenting turns it into a reply handled via buildReplies.
     remapDiscussion(msg, discussions);

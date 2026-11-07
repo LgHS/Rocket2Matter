@@ -5,7 +5,8 @@ import * as path from "node:path";
 import { pipeline } from "node:stream/promises";
 import { Collection, Db, Document, GridFSBucket, ObjectId } from "mongodb";
 import type { RcFileRef, RcUpload, MmAttachment } from "./types.js";
-import { retryTransient } from "./util.js";
+import { retryTransient, throttle } from "./util.js";
+import { config } from "./config.js";
 
 /**
  * Extracts attachments from RocketChat's GridFS storage into the import
@@ -108,6 +109,7 @@ export class FileExporter {
           () =>
             pipeline(
               this.bucket.openDownloadStream(id as never),
+              throttle(config.fileRateLimit),
               createWriteStream(absPath),
             ),
           `téléchargement ${fileName}`,

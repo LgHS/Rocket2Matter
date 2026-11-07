@@ -6,7 +6,7 @@
  *   pnpm tsx test/run.ts
  */
 import { execFile } from "node:child_process";
-import { readFile, rm } from "node:fs/promises";
+import { readFile, rm, writeFile } from "node:fs/promises";
 import { existsSync } from "node:fs";
 import * as path from "node:path";
 import { fileURLToPath } from "node:url";
@@ -53,7 +53,10 @@ async function seed(uri: string, dbName: string) {
   await db.collection("rocketchat_subscription").insertMany([
     { _id: "s1", rid: "r1", t: "c", u: { _id: "u1", username: "alice" }, roles: ["owner"], ls: new Date("2024-01-01T10:02:00Z") },
     { _id: "s2", rid: "r1", t: "c", u: { _id: "u2", username: "Bob" } },
-    { _id: "s3", rid: "r2", t: "p", u: { _id: "u1", username: "alice" } },
+    // RC shows r2 as unread for alice (alert + 2 unread, 1 mention)
+    { _id: "s3", rid: "r2", t: "p", u: { _id: "u1", username: "alice" }, alert: true, unread: 2, userMentions: 1, ls: new Date("2024-01-02T08:05:00Z") },
+    // DM alice↔bob shown as read in RC, although ls lags behind
+    { _id: "s4", rid: "r3", t: "d", u: { _id: "u1", username: "alice" }, alert: false, unread: 0, ls: new Date("2024-01-01T00:00:00Z") },
   ] as never);
 
   await db.collection("rocketchat_message").insertMany([
@@ -92,7 +95,10 @@ async function seed(uri: string, dbName: string) {
     { _id: "m9", rid: "r1", msg: "", ts: new Date("2024-01-05T10:00:00Z"), u: { _id: "u1", username: "alice" }, file: { _id: "fmissing", name: "perdu.png", type: "image/png" }, files: [{ _id: "fmissing", name: "perdu.png", type: "image/png" }] },
     // Discussion linkage: the "discussion-created" system message (in r1) + the
     // discussion's own messages (in r5).
-    { _id: "md0", rid: "r1", t: "discussion-created", drid: "r5", msg: "Sujet de discussion", ts: new Date("2024-01-06T09:00:00Z"), u: { _id: "u1", username: "alice" } },
+    // The discussion was started FROM bob's message mo1 (quoted via message_link).
+    { _id: "mo1", rid: "r1", msg: "Sujet de discussion", ts: new Date("2024-01-06T08:30:00Z"), u: { _id: "u2", username: "Bob" } },
+    { _id: "md0", rid: "r1", t: "discussion-created", drid: "r5", msg: "Sujet de discussion", ts: new Date("2024-01-06T09:00:00Z"), u: { _id: "u1", username: "alice" },
+      attachments: [{ text: "Sujet de discussion", author_name: "Bob", message_link: "/channel/general?msg=mo1" }] },
     { _id: "md1", rid: "r5", msg: "Premier message discussion", ts: new Date("2024-01-06T09:01:00Z"), u: { _id: "u2", username: "Bob" } },
     { _id: "md2", rid: "r5", msg: "Deuxième message discussion", ts: new Date("2024-01-06T09:02:00Z"), u: { _id: "u1", username: "alice" } },
   ] as never);
@@ -118,7 +124,7 @@ async function seed(uri: string, dbName: string) {
 
   // Minimal but valid images (the exporter validates format + dimensions).
   const PNG_1x1 = Buffer.from(
-    "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+M8AAAMBAQDJ/pLvAAAAAElFTkSuQmCC",
+    "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNkYPhfDwAChwGA60e6kgAAAABJRU5ErkJggg==",
     "base64",
   );
   const GIF_1x1 = Buffer.from(
@@ -340,7 +346,12 @@ async function main() {
       !channels.some((c) => c.channel.display_name === "Sujet de discussion"),
       "discussion : pas de canal créé pour la discussion",
     );
-    const discRoot = posts.find((p) => p.post.message === "Sujet de discussion");
+    const discRoots = posts.filter((p) => p.post.message === "Sujet de discussion");
+    check(
+      discRoots.length === 1 && discRoots[0].post.user === "bob",
+      "discussion créée depuis un message : le fil s'accroche au message original (pas de doublon)",
+    );
+    const discRoot = discRoots[0];
     check(
       !!discRoot && discRoot.post.channel === "general",
       "discussion : message d'origine devient un post du canal parent",
@@ -359,6 +370,9 @@ async function main() {
 
     // ----- Second export: archive + "last-seen" read-state options -----
     const outDir2 = path.join(root, "test-out2");
+    // Accounts already in the target MM: bob's email → existing "robert"; "calls" reserved.
+    const existingFile = path.join(root, "test-existing-users.txt");
+    await writeFile(existingFile, "robert bob@x.fr\ncalls calls@localhost\n");
     await exec("pnpm", ["tsx", "src/cli.ts", "export"], {
       cwd: root,
       env: {
@@ -369,13 +383,20 @@ async function main() {
         EXPORT_FILES: "false",
         ARCHIVE_CHANNELS: "true",
         READ_STATE: "last-seen",
+        AUTH_SERVICE: "openid",
+        EXISTING_USERS: existingFile,
       },
     });
+    await rm(existingFile, { force: true });
     const lines2 = (await readFile(path.join(outDir2, "import.jsonl"), "utf8"))
       .trim()
       .split("\n")
       .map((l) => JSON.parse(l) as MmLine);
+    const readSql = existsSync(path.join(outDir2, "readstate.sql"))
+      ? await readFile(path.join(outDir2, "readstate.sql"), "utf8")
+      : "";
     await rm(outDir2, { recursive: true, force: true });
+    await rm(`${outDir2}.state.json`, { force: true });
 
     const channels2 = lines2.filter((l) => l.type === "channel") as Extract<MmLine, { type: "channel" }>[];
     const users2 = lines2.filter((l) => l.type === "user") as Extract<MmLine, { type: "user" }>[];
@@ -398,6 +419,35 @@ async function main() {
       "READ_STATE last-seen : msg_count = nb de posts lus (1)",
     );
 
+    // Per-user read state follows RC's displayed state (alert/unread), not ls
+    check(
+      /\('alice@x\.fr','C','general',\d+,true,0\)/.test(readSql),
+      "readstate : canal lu dans RC (pas d'alert) → lu",
+    );
+    check(
+      /\('alice@x\.fr','C','projet-secret',\d+,false,1\)/.test(readSql),
+      "readstate : canal non lu dans RC → partiel, mentions reprises",
+    );
+    check(
+      readSql.includes("('bob@x.fr','C','projet-secret',0,true,0)"),
+      "readstate : membre par autorat seul (sans abonnement) → lu",
+    );
+    check(
+      /\('alice@x\.fr','D','bob@x\.fr',\d+,true,0\)/.test(readSql),
+      "readstate : DM lu dans RC malgré un ls en retard → lu",
+    );
+
+    const alice2 = users2.find((u) => u.user.username === "alice");
+    check(
+      alice2?.user.auth_service === "openid" && alice2?.user.auth_data === "alice@x.fr",
+      "AUTH_SERVICE : auth_service=openid, auth_data=email",
+    );
+    check(
+      users2.some((u) => u.user.username === "robert" && u.user.email === "bob@x.fr") &&
+        !users2.some((u) => u.user.username === "bob"),
+      "EXISTING_USERS : bob fusionné dans le compte existant robert (même email)",
+    );
+
     console.log(
       failures === 0
         ? `\n🎉 Tous les tests passent.`
@@ -405,6 +455,7 @@ async function main() {
     );
   } finally {
     await rm(outDir, { recursive: true, force: true });
+    await rm(`${outDir}.state.json`, { force: true });
     await mongo.stop();
   }
   process.exit(failures === 0 ? 0 : 1);

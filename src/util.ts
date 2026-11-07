@@ -1,6 +1,40 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 import { createWriteStream, type WriteStream } from "node:fs";
+import { Transform } from "node:stream";
+import { gate } from "./watchdog.js";
 import type { MmLine, MmReaction, RcAttachment, RcReactions } from "./types.js";
+
+// Shared across all streams so the limit is global, not per file.
+const throttleState = { start: 0, bytes: 0, last: 0 };
+
+/**
+ * A pass-through stream capping the cumulative throughput of every throttled
+ * stream to `bytesPerSec` (0 ⇒ no-op). Because GridFS download streams are
+ * pull-based, slowing the consumer slows the reads on the MongoDB side too.
+ */
+export function throttle(bytesPerSec: number): Transform {
+  const pace = (chunk: Buffer, cb: (err: Error | null, data?: Buffer) => void) => {
+    if (!bytesPerSec) return cb(null, chunk);
+    const now = Date.now();
+    // Restart the window after an idle gap (e.g. a paused export), so the
+    // idle time is not "banked" and spent as a burst afterwards.
+    if (!throttleState.start || now - throttleState.last > 5_000) {
+      throttleState.start = now;
+      throttleState.bytes = 0;
+    }
+    throttleState.last = now;
+    throttleState.bytes += chunk.length;
+    const wait = throttleState.start + (throttleState.bytes / bytesPerSec) * 1000 - now;
+    if (wait > 0) setTimeout(() => cb(null, chunk), wait);
+    else cb(null, chunk);
+  };
+  return new Transform({
+    transform(chunk: Buffer, _enc, cb) {
+      // Watchdog pause (source host under pressure): hold the chunk.
+      gate().then(() => pace(chunk, cb), cb);
+    },
+  });
+}
 
 /**
  * Normalize a RocketChat channel name to Mattermost constraints:

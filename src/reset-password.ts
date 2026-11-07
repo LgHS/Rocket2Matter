@@ -16,11 +16,13 @@ import { createInterface, type Interface } from "node:readline";
 import * as path from "node:path";
 import { promisify } from "node:util";
 import { config } from "./config.js";
+import { Target } from "./target.js";
 
 const exec = promisify(execFile);
 
 interface Candidate {
   username: string;
+  email: string;
   name: string;
   admin: boolean;
 }
@@ -43,6 +45,7 @@ async function loadUsers(): Promise<Candidate[]> {
       type: string;
       user?: {
         username: string;
+        email?: string;
         roles?: string;
         first_name?: string;
         last_name?: string;
@@ -56,6 +59,7 @@ async function loadUsers(): Promise<Candidate[]> {
     if (o.type !== "user" || !o.user) continue;
     out.push({
       username: o.user.username,
+      email: o.user.email ?? o.user.username,
       name: `${o.user.first_name ?? ""} ${o.user.last_name ?? ""}`.trim(),
       admin: (o.user.roles ?? "").includes("system_admin"),
     });
@@ -275,11 +279,32 @@ export async function runResetPassword() {
       break;
     }
 
+    // Identify the account by email: an SSO login may have renamed it since.
+    const account = chosen.email;
+
+    // Target configured (TARGET_SSH / TARGET_DOCKER / MM_DIR / MMCTL): same
+    // access path as the rest of the migration, no questions asked.
+    if (config.targetSsh || config.targetDocker || config.mmDir || config.mmctl) {
+      const target = new Target();
+      const args = ["user", "change-password", account, "--password", password];
+      if (process.argv.includes("--dry-run") || process.env.DRY_RUN === "1") {
+        console.log(`\n[dry-run] sur ${target.label} :\n  mmctl --local user change-password ${account} --password ********`);
+        return;
+      }
+      const r = await target.mmctl(args, { allowFail: true });
+      if (r.code !== 0) {
+        console.error(`\n❌ Échec de la réinitialisation : ${(r.stderr || r.stdout).trim()}`);
+        process.exit(1);
+      }
+      console.log(`\n✅ Mot de passe de "${chosen.username}" réinitialisé (${target.label}).`);
+      return;
+    }
+
     // 3. Execution mode (where does mmctl run?)
     const mode = await chooseMode(rl);
 
     // 4. Build the command depending on the mode
-    const inv = await buildInvocation(rl, mode, chosen.username, password);
+    const inv = await buildInvocation(rl, mode, account, password);
 
     // Dry-run mode: run nothing, print the command (password masked).
     if (process.argv.includes("--dry-run") || process.env.DRY_RUN === "1") {

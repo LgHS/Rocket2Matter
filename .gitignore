@@ -9,3 +9,6 @@ deactivated-users.txt
 .DS_Store
 .devbox/
 .claude/
+existing-users.txt
+test/e2e/work/
+*.state.json

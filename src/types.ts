@@ -59,6 +59,12 @@ export interface RcSubscription {
   u: { _id: string; username: string };
   roles?: string[]; // "owner" | "moderator" | ...
   ls?: Date | string | number; // last seen (last read message)
+  // What RocketChat actually displays: the room is shown as read when
+  // `alert` is false and `unread` is 0 (`ls` alone lags, e.g. after the
+  // user's own messages). `userMentions` = unread mentions.
+  alert?: boolean;
+  unread?: number;
+  userMentions?: number;
 }
 
 export interface RcReactions {
@@ -202,6 +208,8 @@ export type MmLine =
         position?: string;
         locale?: string;
         profile_image?: string; // path (relative to the import data root)
+        auth_service?: string; // SSO provider, e.g. "openid"
+        auth_data?: string; // provider-side user id (here: the email)
         teams: MmTeamMembership[];
       };
     }

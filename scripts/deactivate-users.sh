@@ -1,7 +1,9 @@
 #!/usr/bin/env bash
 # Deactivate, in Mattermost, the accounts that were inactive in RocketChat.
 # The Mattermost bulk import has no "deactivated" flag, so this replays the
-# `deactivated-users.txt` list produced by the export (one MM username / line).
+# `deactivated-users.txt` list produced by the export (one email per line —
+# emails, not usernames, since an SSO login may rename accounts).
+# Normally done for you by `rocket2matter post-import`.
 #
 # Usage (on the Mattermost host, local mode enabled):
 #   ./deactivate-users.sh deactivated-users.txt

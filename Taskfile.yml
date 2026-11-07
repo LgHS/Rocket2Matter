@@ -4,7 +4,8 @@
 #
 #   task            # list tasks
 #   task check      # typecheck + tests
-#   task migrate    # export + package
+#   task migrate    # full migration (see rocket2matter.env)
+#   task e2e        # end-to-end test against a real Mattermost (Docker)
 #
 version: "3"
 
@@ -39,13 +40,28 @@ tasks:
       - task: typecheck
       - task: test
 
+  init:
+    desc: Create rocket2matter.env (commented configuration to fill in)
+    cmds:
+      - "{{.PNPM}} cli init"
+
+  preflight:
+    desc: Check source, local machine and target; offer fixes
+    cmds:
+      - "{{.PNPM}} cli preflight {{.CLI_ARGS}}"
+
+  migrate:
+    desc: "Full migration, resumable (preflight → export → package → upload → import → post-import → verify → cleanup). Use `-- --from <step>` / `-- --yes`."
+    cmds:
+      - "{{.PNPM}} cli migrate {{.CLI_ARGS}}"
+
   export:
-    desc: "Export RocketChat → out/import.jsonl (+ data/). Configure via env vars (MONGO_URI, …)."
+    desc: "Export RocketChat → out/ (import.jsonl + data/ + readstate.sql)"
     cmds:
       - "{{.PNPM}} cli export"
 
   package:
-    desc: Package out/ into mattermost-import.zip
+    desc: Package out/ into the import zip
     cmds:
       - "{{.PNPM}} cli package"
 
@@ -54,11 +70,10 @@ tasks:
     cmds:
       - "{{.PNPM}} cli reset-password {{.CLI_ARGS}}"
 
-  migrate:
-    desc: Convenience — export then package
+  e2e:
+    desc: "End-to-end test: real migrate into a stock Mattermost in Docker (KEEP=1 to keep containers)"
     cmds:
-      - task: export
-      - task: package
+      - test/e2e/run.sh
 
   bundle:
     desc: Bundle the CLI into dist/cli.cjs (esbuild)
@@ -80,4 +95,4 @@ tasks:
   clean:
     desc: Remove build/export artifacts (dist/, out/, *.zip)
     cmds:
-      - rm -rf dist out mattermost-import.zip
+      - rm -rf dist out out.state.json mattermost-import.zip test/e2e/work

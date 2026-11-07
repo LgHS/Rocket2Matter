@@ -1,0 +1,31 @@
+# SPDX-License-Identifier: AGPL-3.0-or-later
+# End-to-end test bed: a fake RocketChat MongoDB + a stock Mattermost (Docker),
+# left at its defaults on purpose (local mode off, MaxUsersPerTeam 50) so that
+# `preflight` has to detect and fix them. See run.sh.
+name: r2m-e2e
+
+services:
+  mongo:
+    image: mongo:6
+    container_name: r2m-e2e-mongo
+    ports: ["127.0.0.1:27099:27017"]
+
+  postgres:
+    image: postgres:15-alpine
+    container_name: r2m-e2e-db
+    environment:
+      POSTGRES_USER: mmuser
+      POSTGRES_PASSWORD: mmuser_password
+      POSTGRES_DB: mattermost
+
+  mattermost:
+    image: mattermost/mattermost-team-edition:11.11
+    # Published for amd64 only; emulated on ARM machines (slower but works).
+    platform: linux/amd64
+    container_name: r2m-e2e-mm
+    depends_on: [postgres]
+    environment:
+      MM_SQLSETTINGS_DRIVERNAME: postgres
+      MM_SQLSETTINGS_DATASOURCE: postgres://mmuser:mmuser_password@postgres:5432/mattermost?sslmode=disable&connect_timeout=10
+      MM_SERVICESETTINGS_SITEURL: http://localhost:8099
+    ports: ["127.0.0.1:8099:8065"]

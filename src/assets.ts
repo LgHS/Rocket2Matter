@@ -1,11 +1,13 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 import { createWriteStream } from "node:fs";
 import { mkdir, readFile, rm } from "node:fs/promises";
+import { crc32 } from "node:zlib";
 import * as path from "node:path";
 import { pipeline } from "node:stream/promises";
 import { Collection, Db, Document, GridFSBucket, ObjectId } from "mongodb";
 import type { RcAvatar, RcCustomEmoji } from "./types.js";
-import { retryTransient } from "./util.js";
+import { retryTransient, throttle } from "./util.js";
+import { config } from "./config.js";
 
 // Mattermost's default MaxImageResolution (7680×4320). Images above this are
 // rejected by SetProfileImage / emoji creation and abort the whole import job.
@@ -56,18 +58,50 @@ function probeImage(
   return null;
 }
 
+/**
+ * Structural integrity, beyond the header: a corrupt or truncated image passes
+ * `probeImage` but makes Mattermost's decoder fail — which aborts the WHOLE
+ * import. PNG: every chunk's CRC32 + the final IEND chunk. JPEG / GIF: their
+ * end marker (catches truncated downloads).
+ */
+export function isIntact(buf: Buffer): boolean {
+  if (buf[0] === 0x89 && buf[1] === 0x50) {
+    let off = 8;
+    while (off + 12 <= buf.length) {
+      const len = buf.readUInt32BE(off);
+      const end = off + 12 + len;
+      if (end > buf.length) return false;
+      const crc = buf.readUInt32BE(off + 8 + len);
+      if (crc32(buf.subarray(off + 4, off + 8 + len)) !== crc) return false;
+      if (buf.toString("ascii", off + 4, off + 8) === "IEND") return true;
+      off = end;
+    }
+    return false;
+  }
+  if (buf.toString("ascii", 0, 3) === "GIF") {
+    return buf.subarray(-16).includes(0x3b); // trailer
+  }
+  if (buf[0] === 0xff && buf[1] === 0xd8) {
+    const tail = buf.subarray(-4096);
+    for (let i = tail.length - 2; i >= 0; i--) {
+      if (tail[i] === 0xff && tail[i + 1] === 0xd9) return true; // EOI
+    }
+    return false;
+  }
+  return false;
+}
+
 /** Validates a downloaded image; deletes it and returns false if unusable. */
 async function validateImage(absPath: string, label: string): Promise<boolean> {
   let dim: { width: number; height: number } | null = null;
   try {
-    // The header fits well within the first 64 KiB.
     const buf = await readFile(absPath);
-    dim = probeImage(buf.subarray(0, Math.min(buf.length, 65536)));
+    dim = isIntact(buf) ? probeImage(buf) : null;
   } catch {
     dim = null;
   }
   if (!dim) {
-    console.warn(`  ⚠️  ${label} : format d'image non reconnu — ignoré.`);
+    console.warn(`  ⚠️  ${label} : image corrompue ou format non géré (PNG/JPEG/GIF) — ignorée.`);
     await rm(absPath, { force: true });
     return false;
   }
@@ -126,6 +160,7 @@ async function downloadGridfs(
         () =>
           pipeline(
             bucket.openDownloadStream(id as never),
+            throttle(config.fileRateLimit),
             createWriteStream(absPath),
           ),
         label,
