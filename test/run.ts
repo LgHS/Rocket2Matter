@@ -56,7 +56,9 @@ async function seed(uri: string, dbName: string) {
     // RC shows r2 as unread for alice (alert + 2 unread, 1 mention)
     { _id: "s3", rid: "r2", t: "p", u: { _id: "u1", username: "alice" }, alert: true, unread: 2, userMentions: 1, ls: new Date("2024-01-02T08:05:00Z") },
     // DM alice↔bob shown as read in RC, although ls lags behind
-    { _id: "s4", rid: "r3", t: "d", u: { _id: "u1", username: "alice" }, alert: false, unread: 0, ls: new Date("2024-01-01T00:00:00Z") },
+    { _id: "s4", rid: "r3", t: "d", u: { _id: "u1", username: "alice" }, alert: false, unread: 0, ls: new Date("2024-01-01T00:00:00Z"), f: true },
+    // bob closed the DM in RC (open: false) → not in his Mattermost sidebar
+    { _id: "s5", rid: "r3", t: "d", u: { _id: "u2", username: "Bob" }, open: false, alert: false, unread: 0 },
   ] as never);
 
   await db.collection("rocketchat_message").insertMany([
@@ -69,6 +71,11 @@ async function seed(uri: string, dbName: string) {
     // message from a gone author → ghost, in a channel they are not subscribed to (bob in r2)
     { _id: "m4", rid: "r2", msg: "Note interne", ts: new Date("2024-01-02T08:00:00Z"), u: { _id: "u99", username: "ghosty" } },
     { _id: "m5", rid: "r2", msg: "coucou", ts: new Date("2024-01-02T08:10:00Z"), u: { _id: "u2", username: "Bob" } },
+    // edit history (Message_KeepHistory): previous versions of m1 (root),
+    // m2 (reply) and m6 (DM), hidden, same ts as the original → never exported
+    { _id: "h1", rid: "r1", msg: "Bonjour version 1", ts: new Date("2024-01-01T10:00:00Z"), u: { _id: "u1", username: "alice" }, _hidden: true, parent: "m1" },
+    { _id: "h2", rid: "r1", msg: "Salut version 1", ts: new Date("2024-01-01T10:05:00Z"), u: { _id: "u2", username: "Bob" }, tmid: "m1", _hidden: true, parent: "m2" },
+    { _id: "h6", rid: "r3", msg: "DM version 1", ts: new Date("2024-01-03T12:00:00Z"), u: { _id: "u1", username: "alice" }, _hidden: true, parent: "m6" },
     // direct message
     { _id: "m6", rid: "r3", msg: "DM privé", ts: new Date("2024-01-03T12:00:00Z"), u: { _id: "u1", username: "alice" } },
     // orphan reply (root does not exist)
@@ -263,6 +270,14 @@ async function main() {
 
     // DM
     check(directChannels.length === 1, "1 conversation directe");
+    {
+      const dc = (directChannels[0] as Extract<MmLine, { type: "direct_channel" }>).direct_channel;
+      check(
+        JSON.stringify(dc.shown_by) === '["alice"]',
+        "DM : shown_by = membres l'ayant ouvert dans RC (bob l'avait fermé)",
+      );
+      check(JSON.stringify(dc.favorited_by) === '["alice"]', "DM : favori RC → favorited_by");
+    }
     check(
       directPosts.length === 1 && directPosts[0].direct_post.message === "DM privé",
       "1 message direct exporté",
@@ -273,6 +288,12 @@ async function main() {
       posts.some((p) => p.post.message === "réponse orpheline"),
       "réponse orpheline reclassée en message",
     );
+    // edit history: no previous version exported (root, reply or DM)
+    check(
+      !posts.some((p) => p.post.message.includes("version 1") || p.post.replies?.some((r) => r.message.includes("version 1"))),
+      "historique d'édition (_hidden) ignoré : pas de doublon de post ni de réponse",
+    );
+    check(root1.post.replies?.length === 1, "thread : une seule réponse (pas de version éditée)");
     // m3 (system) absent
     check(
       !posts.some((p) => p.post.message.includes("a rejoint")),

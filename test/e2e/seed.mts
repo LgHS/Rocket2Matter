@@ -51,9 +51,10 @@ await db.collection("rocketchat_subscription").insertMany([
   { _id: "s5", rid: "r1", t: "c", u: { _id: "u2", username: "bob" }, alert: true, unread: 1, userMentions: 1, ls: d("10:00:00") },
   { _id: "s6", rid: "r3", t: "d", u: { _id: "u2", username: "bob" }, alert: true, unread: 1, ls: d("09:00:00") },
   { _id: "s7", rid: "r4", t: "d", u: { _id: "u2", username: "bob" }, alert: false, unread: 0 },
-  // Carol: never opened general (no ls, unread), group read.
+  // Carol: never opened general (no ls, unread), group read but closed
+  // from her sidebar (open: false → no group_channel_show).
   { _id: "s8", rid: "r1", t: "c", u: { _id: "u3", username: "carol" }, alert: true, unread: 3 },
-  { _id: "s9", rid: "r4", t: "d", u: { _id: "u3", username: "carol" }, alert: false, unread: 0 },
+  { _id: "s9", rid: "r4", t: "d", u: { _id: "u3", username: "carol" }, alert: false, unread: 0, open: false },
 ] as never);
 
 await db.collection("rocketchat_message").insertMany([

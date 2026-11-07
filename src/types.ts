@@ -65,6 +65,8 @@ export interface RcSubscription {
   alert?: boolean;
   unread?: number;
   userMentions?: number;
+  open?: boolean; // false ⇒ the user closed (hid) the room from their sidebar
+  f?: boolean; // favorite
 }
 
 export interface RcReactions {
@@ -215,5 +217,10 @@ export type MmLine =
     }
   | { type: "emoji"; emoji: { name: string; image: string } }
   | { type: "post"; post: MmPost }
-  | { type: "direct_channel"; direct_channel: { members: string[]; header?: string } }
+  | { type: "direct_channel"; direct_channel: {
+        members: string[];
+        shown_by?: string[]; // creates the sidebar-visibility preference
+        favorited_by?: string[];
+        header?: string;
+      } }
   | { type: "direct_post"; direct_post: MmDirectPost };

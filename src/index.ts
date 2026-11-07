@@ -34,6 +34,14 @@ import type {
   RcUser,
 } from "./types.js";
 
+/**
+ * A user message that is still current. `t` set ⇒ system message. `_hidden` ⇒
+ * a previous version kept by RocketChat's edit history (Message_KeepHistory):
+ * same text lineage, new _id, `parent` = the live message. Exporting those
+ * turns every edit into an extra post.
+ */
+const LIVE_USER_MESSAGE = { t: { $exists: false }, _hidden: { $ne: true } } as const;
+
 interface ChannelInfo {
   name: string; // normalized Mattermost name
   display: string;
@@ -46,6 +54,8 @@ interface ChannelInfo {
 interface DirectInfo {
   members: string[]; // Mattermost usernames (resolved)
   uids?: string[]; // RocketChat ids, fallback when usernames are missing
+  shownBy?: string[]; // members who have it in their sidebar (see loadDirectVisibility)
+  favoritedBy?: string[];
 }
 
 /**
@@ -218,6 +228,7 @@ export async function runExport(opts: ExportOptions = {}) {
     // Resolve direct-conversation members
     if (config.exportDirect) {
       resolveDirects(directs, usernameMap, usernameById, ghost);
+      await loadDirectVisibility(db, directs, usernameMap, usernameById);
       console.log(`💬 ${directs.size} conversations directes retenues.`);
     } else {
       directs.clear();
@@ -327,7 +338,11 @@ export async function runExport(opts: ExportOptions = {}) {
       for (const di of directs.values()) {
         writer.write({
           type: "direct_channel",
-          direct_channel: { members: di.members },
+          direct_channel: {
+            members: di.members,
+            ...(di.shownBy?.length ? { shown_by: di.shownBy } : {}),
+            ...(di.favoritedBy?.length ? { favorited_by: di.favoritedBy } : {}),
+          },
         });
       }
     }
@@ -545,7 +560,7 @@ async function loadDiscussionRoots(
   if (quoted.size) {
     const originals = await db
       .collection<RcMessage>("rocketchat_message")
-      .find({ _id: { $in: [...quoted.values()] }, t: { $exists: false } })
+      .find({ _id: { $in: [...quoted.values()] }, ...LIVE_USER_MESSAGE })
       .toArray();
     const byId = new Map(originals.map((o) => [o._id, o]));
     for (const [drid, id] of quoted) {
@@ -610,6 +625,45 @@ function resolveDirects(
       continue;
     }
     di.members = [...resolved];
+  }
+}
+
+/**
+ * Mattermost lists a DM/group in a user's sidebar only through a
+ * `direct_channel_show` / `group_channel_show` preference, which the bulk
+ * import creates solely from `shown_by`. Without it, imported conversations
+ * exist but stay invisible until reopened one by one. Mirror RocketChat: a
+ * member sees the conversation if their subscription is open (`open` absent ⇒
+ * open). Members without a subscription (rare, old data) see it too.
+ */
+async function loadDirectVisibility(
+  db: Db,
+  directs: Map<string, DirectInfo>,
+  usernameMap: Map<string, string>,
+  usernameById: Map<string, string>,
+) {
+  const hidden = new Map<string, Set<string>>(); // roomId → members who closed it
+  const favorite = new Map<string, Set<string>>();
+  const cursor = db
+    .collection<RcSubscription>("rocketchat_subscription")
+    .find({ t: "d" }, { projection: { rid: 1, u: 1, open: 1, f: 1 } });
+  for await (const sub of cursor) {
+    if (!directs.has(sub.rid)) continue;
+    const mm = usernameById.get(sub.u._id) ?? usernameMap.get(sub.u.username);
+    if (!mm) continue;
+    const bucket = (m: Map<string, Set<string>>) => {
+      let set = m.get(sub.rid);
+      if (!set) m.set(sub.rid, (set = new Set()));
+      set.add(mm);
+    };
+    if (sub.open === false) bucket(hidden);
+    if (sub.f === true) bucket(favorite);
+  }
+  for (const [roomId, di] of directs) {
+    const closed = hidden.get(roomId);
+    di.shownBy = di.members.filter((m) => !closed?.has(m));
+    const fav = favorite.get(roomId);
+    di.favoritedBy = di.members.filter((m) => fav?.has(m));
   }
 }
 
@@ -740,7 +794,7 @@ async function scanMessages(
 ) {
   const cursor = db
     .collection<RcMessage>("rocketchat_message")
-    .find({ t: { $exists: false } })
+    .find(LIVE_USER_MESSAGE)
     .addCursorFlag("noCursorTimeout", true);
 
   for await (const msg of cursor) {
@@ -899,7 +953,7 @@ async function writePosts(
   // source host. Per-file downloads below are individually retried/skipped.
   const cursor = db
     .collection<RcMessage>("rocketchat_message")
-    .find({ t: { $exists: false }, tmid: { $exists: false } })
+    .find({ ...LIVE_USER_MESSAGE, tmid: { $exists: false } })
     .addCursorFlag("noCursorTimeout", true)
     .sort({ ts: 1 });
 

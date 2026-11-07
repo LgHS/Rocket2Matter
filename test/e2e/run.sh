@@ -73,6 +73,8 @@ check "émoji + alias"                          "select count(*) from emoji wher
 check "alias en conflit avec un émoji système ignoré" "select count(*) from emoji where name='parrot'" "0"
 grep -q "non importés : parrot" "$WORK/migrate.log" && echo "  ✅ verify explique l'émoji ignoré" || { echo "  ❌ verify n'explique pas l'émoji ignoré"; fail=1; }
 check "DM et groupe"                           "select count(*) from channels where type in ('D','G')" "2"
+check "DM visible dans la barre (Alice, Bob)"   "select count(*) from preferences where category='direct_channel_show' and value='true'" "2"
+check "groupe visible sauf pour Carol (fermé)"  "select count(*) from preferences where category='group_channel_show' and value='true'" "2"
 check "message système RC ignoré"              "select count(*) from posts where message='a rejoint'" "0"
 check "auteur supprimé → reste attribué (dave)" "select u.email from posts p join users u on u.id=p.userid where p.message like 'Message de Dave%'" "dave@e2e.test"
 # Read state, per user (from each user's RocketChat subscription)
