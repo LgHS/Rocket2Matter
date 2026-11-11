@@ -166,6 +166,35 @@ export function defuseMentions(
 }
 
 /**
+ * RocketChat links a channel with `#name`, Mattermost with `~name` (its
+ * normalized name). `channelRefs` maps each exported channel's RocketChat name,
+ * lowercased, to its Mattermost name. Only known channels are converted, so
+ * plain hashtags (#startup) stay as they are; code spans and blocks are left
+ * untouched (#define, #include…). Old RocketChat messages have no `channels`
+ * field, hence the lookup by name rather than by the message's metadata.
+ */
+export function convertChannelRefs(text: string, channelRefs: Map<string, string>): string {
+  if (!text || !text.includes("#") || !channelRefs.size) return text;
+  // split on fenced blocks and inline code; odd indexes are code
+  return text
+    .split(/(```[\s\S]*?(?:```|$)|`[^`\n]*`)/)
+    .map((part, i) =>
+      i % 2
+        ? part
+        : part.replace(
+            /(^|[^\w&#/~])#([\p{L}\p{N}._-]+)/gu,
+            (match, before: string, name: string) => {
+              // a trailing dot/dash is punctuation, not part of the name
+              const trimmed = name.replace(/[.-]+$/, "");
+              const mm = channelRefs.get(trimmed.toLowerCase());
+              return mm ? `${before}~${mm}${name.slice(trimmed.length)}` : match;
+            },
+          ),
+    )
+    .join("");
+}
+
+/**
  * Extract the caption of a RocketChat file message. Files uploaded with a
  * comment have an empty `msg` and the caption in `attachments[].description`.
  * Only file-type attachments (title_link/image_url/type=file) are considered,

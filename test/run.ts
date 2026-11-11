@@ -76,6 +76,8 @@ async function seed(uri: string, dbName: string) {
     { _id: "h1", rid: "r1", msg: "Bonjour version 1", ts: new Date("2024-01-01T10:00:00Z"), u: { _id: "u1", username: "alice" }, _hidden: true, parent: "m1" },
     { _id: "h2", rid: "r1", msg: "Salut version 1", ts: new Date("2024-01-01T10:05:00Z"), u: { _id: "u2", username: "Bob" }, tmid: "m1", _hidden: true, parent: "m2" },
     { _id: "h6", rid: "r3", msg: "DM version 1", ts: new Date("2024-01-03T12:00:00Z"), u: { _id: "u1", username: "alice" }, _hidden: true, parent: "m6" },
+    // channel links: #Général → ~general; hashtag, code and URL fragment untouched
+    { _id: "m10", rid: "r1", msg: "Voir #Général. Pas #startup, ni `#define X`, ni https://x.be/a#général", ts: new Date("2024-01-01T11:00:00Z"), u: { _id: "u1", username: "alice" } },
     // direct message
     { _id: "m6", rid: "r3", msg: "DM privé", ts: new Date("2024-01-03T12:00:00Z"), u: { _id: "u1", username: "alice" } },
     // orphan reply (root does not exist)
@@ -294,6 +296,10 @@ async function main() {
       "historique d'édition (_hidden) ignoré : pas de doublon de post ni de réponse",
     );
     check(root1.post.replies?.length === 1, "thread : une seule réponse (pas de version éditée)");
+    check(
+      posts.some((p) => p.post.message === "Voir ~general. Pas #startup, ni `#define X`, ni https://x.be/a#général"),
+      "lien de canal #Général → ~general (hashtag, code et URL intacts)",
+    );
     // m3 (system) absent
     check(
       !posts.some((p) => p.post.message.includes("a rejoint")),

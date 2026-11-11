@@ -15,6 +15,7 @@ export const READSTATE_FILE = "readstate.sql";
 import {
   JsonlWriter,
   combineMessage,
+  convertChannelRefs,
   convertReactions,
   defuseMentions,
   extractCaption,
@@ -42,8 +43,12 @@ import type {
  */
 const LIVE_USER_MESSAGE = { t: { $exists: false }, _hidden: { $ne: true } } as const;
 
+/** RocketChat channel name (lowercased) → Mattermost name, for `#name` → `~name`. */
+let channelRefs = new Map<string, string>();
+
 interface ChannelInfo {
   name: string; // normalized Mattermost name
+  rcName: string; // RocketChat name (what `#name` refers to)
   display: string;
   type: "O" | "P";
   topic?: string;
@@ -212,6 +217,12 @@ export async function runExport(opts: ExportOptions = {}) {
   try {
     // ----- 1. Rooms -----
     const { channels, directs, discussions } = await loadRooms(db);
+    channelRefs = new Map();
+    for (const ci of channels.values()) {
+      for (const n of [ci.rcName, ci.display]) {
+        if (n && !channelRefs.has(n.toLowerCase())) channelRefs.set(n.toLowerCase(), ci.name);
+      }
+    }
     if (config.mergeDiscussions && discussions.size) {
       await loadDiscussionRoots(db, discussions, channels);
     }
@@ -517,6 +528,7 @@ async function loadRooms(db: Db) {
 
     channels.set(room._id, {
       name,
+      rcName: room.name,
       display: (room.fname || room.name).slice(0, 64),
       type: room.t === "c" ? "O" : "P",
       topic: room.topic,
@@ -1022,7 +1034,7 @@ async function writePosts(
     const rootId = d.root.msgId;
     if (seenRoots.has(rootId)) continue;
     const replies = config.exportThreads ? await buildReplies(rootId) : [];
-    const message = defuseMentions(d.root.msg ?? "", usernameMap);
+    const message = convertChannelRefs(defuseMentions(d.root.msg ?? "", usernameMap), channelRefs);
     if (!message && !replies.length) continue;
     const author = (d.root.user && usernameMap.get(d.root.user)) || ghost;
     seenRoots.add(rootId);
@@ -1145,9 +1157,9 @@ async function reactionsAndFiles(
 
 /** Builds a post's text: message + file caption, with mentions processed. */
 function buildMessage(msg: RcMessage, usernameMap: Map<string, string>): string {
-  return defuseMentions(
-    combineMessage(msg.msg, extractCaption(msg.attachments)),
-    usernameMap,
+  return convertChannelRefs(
+    defuseMentions(combineMessage(msg.msg, extractCaption(msg.attachments)), usernameMap),
+    channelRefs,
   );
 }
 
