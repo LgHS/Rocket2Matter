@@ -16,6 +16,7 @@ import {
   JsonlWriter,
   combineMessage,
   convertChannelRefs,
+  decodeHtmlEntities,
   convertReactions,
   defuseMentions,
   extractCaption,
@@ -313,8 +314,8 @@ export async function runExport(opts: ExportOptions = {}) {
           name: ci.name,
           display_name: ci.display,
           type: ci.type,
-          ...(ci.topic ? { header: ci.topic.slice(0, 1024) } : {}),
-          ...(ci.description ? { purpose: ci.description.slice(0, 250) } : {}),
+          ...(ci.topic ? { header: convertChannelRefs(ci.topic, channelRefs).slice(0, 1024) } : {}),
+          ...(ci.description ? { purpose: convertChannelRefs(ci.description, channelRefs).slice(0, 250) } : {}),
           ...(config.archiveChannels || ci.archived
             ? { deleted_at: reads.archiveAt }
             : {}),
@@ -531,8 +532,8 @@ async function loadRooms(db: Db) {
       rcName: room.name,
       display: (room.fname || room.name).slice(0, 64),
       type: room.t === "c" ? "O" : "P",
-      topic: room.topic,
-      description: room.description,
+      topic: room.topic && decodeHtmlEntities(room.topic),
+      description: room.description && decodeHtmlEntities(room.description),
       archived: room.archived === true,
     });
   }

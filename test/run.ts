@@ -42,7 +42,7 @@ async function seed(uri: string, dbName: string) {
   ] as never);
 
   await db.collection("rocketchat_room").insertMany([
-    { _id: "r1", t: "c", name: "Général", fname: "Général", topic: "Salon principal" },
+    { _id: "r1", t: "c", name: "Général", fname: "Général", topic: "Salon principal, voir aussi #Général", description: "Annonces : #général, l&#39;essentiel &amp; plus" },
     { _id: "r2", t: "p", name: "Projet Secret", archived: true },
     { _id: "r3", t: "d", usernames: ["alice", "Bob"], uids: ["u1", "u2"] },
     // Discussion (child of r1): must NOT become a channel; its messages become
@@ -300,6 +300,13 @@ async function main() {
       posts.some((p) => p.post.message === "Voir ~general. Pas #startup, ni `#define X`, ni https://x.be/a#général"),
       "lien de canal #Général → ~general (hashtag, code et URL intacts)",
     );
+    {
+      const gen = (byType("channel") as Extract<MmLine, { type: "channel" }>[]).find((c) => c.channel.name === "general")!;
+      check(
+        gen.channel.header === "Salon principal, voir aussi ~general" && gen.channel.purpose === "Annonces : ~general, l'essentiel & plus",
+        "en-tête/description : liens de canal convertis, entités HTML décodées",
+      );
+    }
     // m3 (system) absent
     check(
       !posts.some((p) => p.post.message.includes("a rejoint")),

@@ -166,6 +166,24 @@ export function defuseMentions(
 }
 
 /**
+ * RocketChat stores channel topics/descriptions HTML-escaped (`N&#39;importe`);
+ * Mattermost renders headers/purposes as Markdown, so the entities would show
+ * literally. Decodes the entities RocketChat produces (numeric + the basic
+ * named ones); `&amp;` last so `&amp;lt;` stays `&lt;`.
+ */
+export function decodeHtmlEntities(text: string): string {
+  if (!text || !text.includes("&")) return text;
+  return text
+    .replace(/&#(\d+);/g, (_, n: string) => String.fromCodePoint(Number(n)))
+    .replace(/&#x([0-9a-f]+);/gi, (_, h: string) => String.fromCodePoint(parseInt(h, 16)))
+    .replace(/&quot;/g, '"')
+    .replace(/&apos;/g, "'")
+    .replace(/&lt;/g, "<")
+    .replace(/&gt;/g, ">")
+    .replace(/&amp;/g, "&");
+}
+
+/**
  * RocketChat links a channel with `#name`, Mattermost with `~name` (its
  * normalized name). `channelRefs` maps each exported channel's RocketChat name,
  * lowercased, to its Mattermost name. Only known channels are converted, so
